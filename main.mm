@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed compilation errors
+// Fixed - removed unused code
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -176,11 +176,7 @@ static vm_address_t find_blackrussia_framework(void) {
             gSectionCount = 0;
             uint64_t size = 0;
             
-            // Use getsectiondata instead of deprecated getsectdatafromheader_64
-            unsigned long dataSize = 0;
-            uint8_t *dataPtr = getsectiondata(&_mh_execute_header, "__DATA", "__data", &dataSize);
-            // Actually we need to use the header we have
-            // For compatibility, we still use getsectdatafromheader_64 but suppress warnings
+            // Use getsectdatafromheader_64 with pragma to suppress warnings
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
             char *ptr = getsectdatafromheader_64(header, "__DATA", "__data", &size);
