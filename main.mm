@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed forward declaration issue
+// With logging to HitBoxes.log in saves folder
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -32,12 +32,54 @@ static HitboxPattern gPatterns[] = {
 #define PATTERN_COUNT (sizeof(gPatterns)/sizeof(gPatterns[0]))
 
 // ============================================================
-// 2. Forward declaration
+// 2. Logging helper
+// ============================================================
+static void write_log(NSString *message) {
+    @autoreleasepool {
+        // Get documents/saves directory
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *documentsPath = [paths firstObject];
+        NSString *savesPath = [documentsPath stringByAppendingPathComponent:@"saves"];
+        
+        // Create saves directory if it doesn't exist
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        if (![fileManager fileExistsAtPath:savesPath]) {
+            [fileManager createDirectoryAtPath:savesPath withIntermediateDirectories:YES attributes:nil error:nil];
+        }
+        
+        NSString *logPath = [savesPath stringByAppendingPathComponent:@"HitBoxes.log"];
+        
+        // Get current timestamp
+        NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+        [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+        NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+        
+        // Format log entry
+        NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+        
+        // Append to file
+        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+        if (fileHandle) {
+            [fileHandle seekToEndOfFile];
+            [fileHandle writeData:[logEntry dataUsingEncoding:NSUTF8StringEncoding]];
+            [fileHandle closeFile];
+        } else {
+            // Create new file
+            [logEntry writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        
+        // Also log to console
+        NSLog(@"%@", logEntry);
+    }
+}
+
+// ============================================================
+// 3. Forward declaration
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle);
 
 // ============================================================
-// 3. Memory scanning helpers
+// 4. Memory scanning helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -99,16 +141,22 @@ static void get_regions(vm_address_t *outBase, vm_size_t *outSize) {
 }
 
 // ============================================================
-// 4. Main patching logic
+// 5. Main patching logic
 // ============================================================
 static void patch_hitboxes(void) {
+    write_log(@"=== Hitbox Patcher Started ===");
+    
     gTask = mach_task_self();
     
     vm_address_t base = 0;
     vm_size_t size = 0;
     get_regions(&base, &size);
     
+    write_log([NSString stringWithFormat:@"Base address: 0x%llX, Size: 0x%llX", 
+               (unsigned long long)base, (unsigned long long)size]);
+    
     if (base == 0 || size == 0) {
+        write_log(@"ERROR: Failed to get memory region");
         show_notification(@"Hitboxes not found.", @"");
         return;
     }
@@ -117,6 +165,9 @@ static void patch_hitboxes(void) {
     vm_address_t found = 0;
     vm_address_t scanAddr = base;
     vm_size_t chunkSize = 0x100000; // 1MB chunks
+    int chunkCount = 0;
+    
+    write_log(@"Scanning memory for hitbox pattern...");
     
     while (scanAddr < base + size) {
         vm_size_t remaining = base + size - scanAddr;
@@ -126,36 +177,60 @@ static void patch_hitboxes(void) {
                                                   gPatterns[0].original[0], 0x20);
         if (hit) {
             found = hit;
+            write_log([NSString stringWithFormat:@"Pattern found at: 0x%llX (chunk %d)", 
+                       (unsigned long long)hit, chunkCount]);
             break;
         }
         scanAddr += currentSize;
+        chunkCount++;
+        
+        if (chunkCount % 10 == 0) {
+            write_log([NSString stringWithFormat:@"Scanned %d chunks, current address: 0x%llX", 
+                       chunkCount, (unsigned long long)scanAddr]);
+        }
     }
     
     if (!found) {
+        write_log(@"ERROR: Hitbox pattern not found in memory");
         show_notification(@"Hitboxes not found.", @"");
         return;
     }
+    
+    write_log([NSString stringWithFormat:@"Patching at address: 0x%llX", (unsigned long long)found]);
     
     // Patch all 10 values
     BOOL success = YES;
     for (int i = 0; i < PATTERN_COUNT; i++) {
         vm_address_t patchAddr = found + i * 0x20;
+        uint32_t originalValue = 0;
+        read_memory(patchAddr, &originalValue, 4);
+        
         if (!write_memory(patchAddr, &gPatterns[i].patched[0], 4)) {
             success = NO;
+            write_log([NSString stringWithFormat:@"ERROR: Failed to patch %s at 0x%llX", 
+                       gPatterns[i].name, (unsigned long long)patchAddr]);
             break;
         }
+        
+        write_log([NSString stringWithFormat:@"Patched %s: 0x%08X -> 0x%08X at 0x%llX", 
+                   gPatterns[i].name, originalValue, gPatterns[i].patched[0], 
+                   (unsigned long long)patchAddr]);
     }
     
     if (success) {
+        write_log(@"SUCCESS: All hitboxes patched!");
         NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX", (unsigned long long)found];
         show_notification(@"Hitboxes patched successfully!", msg);
     } else {
+        write_log(@"ERROR: Partial patch - some hitboxes failed");
         show_notification(@"Hitboxes patched partially.", @"");
     }
+    
+    write_log(@"=== Hitbox Patcher Finished ===\n");
 }
 
 // ============================================================
-// 5. Notification display (UIAlertController)
+// 6. Notification display (UIAlertController)
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -204,10 +279,13 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 6. Entry point - called when library is loaded
+// 7. Entry point - called when library is loaded
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
+    write_log(@"=== Hitbox Patcher Loaded ===");
+    write_log(@"Waiting 2 seconds for app to initialize...");
+    
     // Wait a bit for the app to fully launch
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
@@ -216,7 +294,7 @@ static void initialize(void) {
 }
 
 // ============================================================
-// 7. Dummy export to avoid stripping
+// 8. Dummy export to avoid stripping
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
