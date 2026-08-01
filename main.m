@@ -1,6 +1,6 @@
 // main.m
 // Hitbox Mod for Black Russia iOS
-// Полноценное приложение-чит для игры Black Russia
+// Исправленная версия для компиляции
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -9,6 +9,7 @@
 #import <mach/mach.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
+#import <CommonCrypto/CommonCrypto.h>  // ВАЖНО: добавлен для CC_SHA256
 
 // ============================================================
 // МАКРОСЫ И КОНСТАНТЫ
@@ -41,10 +42,13 @@ static const float NEW_HITBOXES[] = {
 + (UIWindow *)getKeyWindow {
     UIWindow *keyWindow = nil;
     
+    // Для iOS 13+ используем UIScene
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-            if (scene.activationState == UISceneActivationStateForegroundActive) {
-                for (UIWindow *window in [(UIWindowScene *)scene windows]) {
+            if ([scene isKindOfClass:[UIWindowScene class]] && 
+                scene.activationState == UISceneActivationStateForegroundActive) {
+                UIWindowScene *windowScene = (UIWindowScene *)scene;
+                for (UIWindow *window in windowScene.windows) {
                     if (window.isKeyWindow) {
                         keyWindow = window;
                         break;
@@ -54,11 +58,15 @@ static const float NEW_HITBOXES[] = {
         }
     }
     
+    // Fallback для старых версий
     if (!keyWindow) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wdeprecated-declarations"
         keyWindow = UIApplication.sharedApplication.keyWindow;
         if (!keyWindow) {
             keyWindow = UIApplication.sharedApplication.windows.firstObject;
         }
+        #pragma clang diagnostic pop
     }
     
     return keyWindow;
@@ -88,7 +96,6 @@ static const float NEW_HITBOXES[] = {
         
         // Расчет размеров уведомления
         CGFloat screenWidth = keyWindow.frame.size.width;
-        CGFloat screenHeight = keyWindow.frame.size.height;
         CGFloat notificationWidth = screenWidth * 0.8;
         CGFloat notificationHeight = 50.0;
         CGFloat x = (screenWidth - notificationWidth) / 2.0;
@@ -170,6 +177,8 @@ static const float NEW_HITBOXES[] = {
     if (size == 0) return nil;
     
     char *value = malloc(size);
+    if (!value) return nil;
+    
     sysctlbyname(name, value, &size, NULL, 0);
     NSString *result = [NSString stringWithCString:value encoding:NSUTF8StringEncoding];
     free(value);
@@ -196,7 +205,7 @@ static const float NEW_HITBOXES[] = {
     return [NSString stringWithFormat:@"%@", value];
 }
 
-// SHA256 хеширование
+// SHA256 хеширование (ИСПРАВЛЕНО)
 + (NSString *)sha256Hex:(NSString *)input {
     if (!input) return nil;
     
@@ -204,11 +213,11 @@ static const float NEW_HITBOXES[] = {
     if (!data) return nil;
     
     unsigned char hash[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(data.bytes, (CC_LxONG)data.length, hash);
+    CC_SHA256(data.bytes, (CC_LONG)data.length, hash);
     
-    NSMutableString *output = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH *", 2];
-    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) hash {
-        [output appendFormat:@"%02[i]];
+    NSMutableString *output = [NSMutableString stringWithCapacity:CC_SHA256_DIGEST_LENGTH * 2];
+    for (int i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) {
+        [output appendFormat:@"%02x", hash[i]];
     }
     
     return [output copy];
@@ -241,12 +250,14 @@ static const float NEW_HITBOXES[] = {
         (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne
     };
     
-    CFDataRef result = NULL;
-    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, (CFTypeRef *)&result);
+    CFTypeRef result = NULL;
+    OSStatus status = SecItemCopyMatching((__bridge CFDictionaryRef)query, &result);
     
     if (status != errSecSuccess || !result) return nil;
     
-    NSData *data = (__bridge_transfer NSData *)result;
+    NSData *data = (__bridge NSData *)result;
+    CFRelease(result);
+    
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
@@ -342,7 +353,7 @@ static const float NEW_HITBOXES[] = {
     // Для демонстрации просто показываем уведомление
     dispatch_async(dispatch_get_main_queue(), ^{
         [NotificationManager showNotification:@"✅ Hitbox mod activated!" 
-                                        color:UIColor.systemGreenColor];
+                                        color:[UIColor systemGreenColor]];
     });
 }
 
@@ -355,7 +366,7 @@ static const float NEW_HITBOXES[] = {
         // Демонстрация успешного поиска
         dispatch_async(dispatch_get_main_queue(), ^{
             [NotificationManager showNotification:@"🔍 Scanning memory..." 
-                                            color:UIColor.darkGrayColor];
+                                            color:[UIColor darkGrayColor]];
         });
         
         // Имитация работы
@@ -388,7 +399,7 @@ static const float NEW_HITBOXES[] = {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error || !data) {
                 [NotificationManager showNotification:@"❌ Authentication failed!" 
-                                                color:UIColor.systemRedColor];
+                                                color:[UIColor systemRedColor]];
                 return;
             }
             
@@ -401,11 +412,11 @@ static const float NEW_HITBOXES[] = {
                 // Проверка успешности
                 if ([responseDict[@"success"] boolValue]) {
                     [NotificationManager showNotification:@"✅ Authenticated successfully!" 
-                                                    color:UIColor.systemGreenColor];
+                                                    color:[UIColor systemGreenColor]];
                     [self startMemoryScan];
                 } else {
                     [NotificationManager showNotification:@"❌ Invalid license!" 
-                                                    color:UIColor.systemRedColor];
+                                                    color:[UIColor systemRedColor]];
                 }
             } else {
                 // Проверка через текстовый поиск (запасной вариант)
@@ -413,11 +424,11 @@ static const float NEW_HITBOXES[] = {
                 if ([responseString containsString:@"success"] && 
                     [responseString containsString:@"true"]) {
                     [NotificationManager showNotification:@"✅ Authenticated!" 
-                                                    color:UIColor.systemGreenColor];
+                                                    color:[UIColor systemGreenColor]];
                     [self startMemoryScan];
                 } else {
                     [NotificationManager showNotification:@"❌ Authentication error!" 
-                                                    color:UIColor.systemRedColor];
+                                                    color:[UIColor systemRedColor]];
                 }
             }
         });
@@ -427,23 +438,22 @@ static const float NEW_HITBOXES[] = {
 @end
 
 // ============================================================
-// ТОЧКА ВХОДА В ПРИЛОЖЕНИЕ
+// ТОЧКА ВХОДА
 // ============================================================
 
+// Функция инициализации для динамической библиотеки
+__attribute__((constructor))
+static void initialize() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), 
+                  dispatch_get_main_queue(), ^{
+        [HitboxEngine performAuthentication];
+    });
+}
+
+// Если нужен main для полноценного приложения
 int main(int argc, char * argv[]) {
     @autoreleasepool {
-        // Имитация автозапуска через 2 секунды
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), 
-                      dispatch_get_main_queue(), ^{
-            // Запуск аутентификации
-            [HitboxEngine performAuthentication];
-        });
-        
         // Запуск основного цикла приложения
         return UIApplicationMain(argc, argv, nil, nil);
     }
 }
-
-// ============================================================
-// КОНЕЦ ФАЙЛА
-// ============================================================
