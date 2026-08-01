@@ -1,6 +1,6 @@
 // ============================================================
-// main.m - ПОЛНОСТЬЮ РАБОЧАЯ ВЕРСИЯ
-// Исправлены все ошибки компиляции
+// main.m - ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
+// Используем стандартные Mach функции вместо deprecated
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -8,7 +8,6 @@
 #import <Security/Security.h>
 #import <dlfcn.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <mach-o/dyld.h>
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
@@ -309,7 +308,7 @@ static const float NEW_HITBOXES[] = {
 @end
 
 // ============================================================
-// KittyMemory - РАБОТА С ПАМЯТЬЮ
+// KittyMemory - РАБОТА С ПАМЯТЬЮ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 // ============================================================
 
 @interface KittyMemory : NSObject
@@ -321,7 +320,6 @@ static const float NEW_HITBOXES[] = {
 @implementation KittyMemory
 
 + (unsigned long long)getAbsoluteAddress:(const char *)name offset:(unsigned long long)offset {
-    // Ищем библиотеку в памяти через dyld
     uint32_t imageCount = _dyld_image_count();
     for (uint32_t i = 0; i < imageCount; i++) {
         const char *imageName = _dyld_get_image_name(i);
@@ -337,12 +335,12 @@ static const float NEW_HITBOXES[] = {
 + (BOOL)memRead:(void *)address buffer:(void *)buffer size:(size_t)size {
     if (!address || !buffer || size == 0) return NO;
     
-    mach_vm_size_t readSize = 0;
-    kern_return_t kr = mach_vm_read_overwrite(
+    vm_size_t readSize = 0;
+    kern_return_t kr = vm_read_overwrite(
         mach_task_self(),
-        (mach_vm_address_t)address,
+        (vm_address_t)address,
         size,
-        (mach_vm_address_t)buffer,
+        (vm_address_t)buffer,
         &readSize
     );
     
@@ -354,11 +352,11 @@ static const float NEW_HITBOXES[] = {
     
     task_t task = mach_task_self();
     
-    // Получаем информацию о странице
+    // Получаем информацию о странице через vm_region
     vm_address_t addr = (vm_address_t)address;
     vm_size_t pageSize = 0;
     natural_t depth = 0x1000;
-    vm_region_submap_short_info_64 info;
+    struct vm_region_submap_short_info_64 info;
     mach_msg_type_number_t infoCnt = VM_REGION_SUBMAP_SHORT_INFO_COUNT_64;
     
     kern_return_t kr = vm_region_recurse_64(
@@ -374,15 +372,15 @@ static const float NEW_HITBOXES[] = {
     
     // Вычисляем начало страницы
     long pageSizeSys = sysconf(_SC_PAGESIZE);
-    mach_vm_address_t pageStart = (mach_vm_address_t)address & ~(pageSizeSys - 1);
-    mach_vm_size_t pageSizeAligned = ((mach_vm_address_t)address + size + pageSizeSys - 1) & ~(pageSizeSys - 1) - pageStart;
+    vm_address_t pageStart = (vm_address_t)address & ~(pageSizeSys - 1);
+    vm_size_t pageSizeAligned = ((vm_address_t)address + size + pageSizeSys - 1) & ~(pageSizeSys - 1) - pageStart;
     
     // Меняем защиту если нужно
     if (!(info.protection & VM_PROT_WRITE)) {
         kr = vm_protect(task, pageStart, pageSizeAligned, 0, VM_PROT_READ | VM_PROT_WRITE);
         if (kr != KERN_SUCCESS) return NO;
         
-        kr = mach_vm_write(task, (mach_vm_address_t)address, (vm_offset_t)bytes, (mach_msg_type_number_t)size);
+        kr = vm_write(task, (vm_address_t)address, (vm_offset_t)bytes, (mach_msg_type_number_t)size);
         if (kr != KERN_SUCCESS) {
             vm_protect(task, pageStart, pageSizeAligned, 0, info.protection);
             return NO;
@@ -390,7 +388,7 @@ static const float NEW_HITBOXES[] = {
         
         vm_protect(task, pageStart, pageSizeAligned, 0, info.protection);
     } else {
-        kr = mach_vm_write(task, (mach_vm_address_t)address, (vm_offset_t)bytes, (mach_msg_type_number_t)size);
+        kr = vm_write(task, (vm_address_t)address, (vm_offset_t)bytes, (mach_msg_type_number_t)size);
         if (kr != KERN_SUCCESS) return NO;
     }
     
