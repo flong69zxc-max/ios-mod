@@ -13,59 +13,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Download ImGui
+      - name: Compile main.m to dylib (arm64 iOS)
         run: |
-          git clone --depth 1 https://github.com/ocornut/imgui.git
-          # Исправление: скачиваем правильную версию ImGui
-          cd imgui && git checkout v1.90.6
-
-      - name: Compile to dylib (arm64 iOS)
-        run: |
-          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "🔧 Using SDK: $SDK_PATH"
-          
-          # Исправление: добавляем -DIMGUI_IMPL_METAL_CPP
-          xcrun -sdk iphoneos clang++ \
-            -arch arm64 \
-            -std=c++17 \
-            -O2 \
-            -fobjc-arc \
-            -DIMGUI_IMPL_METAL_CPP \
-            -dynamiclib \
-            -isysroot $SDK_PATH \
-            -I./imgui \
-            -I./imgui/backends \
-            -framework UIKit \
-            -framework Metal \
-            -framework MetalKit \
-            -framework Foundation \
-            -framework CoreGraphics \
-            -framework QuartzCore \
-            -framework CoreMedia \
-            -framework IOKit \
-            -framework IOSurface \
-            -framework CoreVideo \
-            -framework OpenGLES \
-            -lc++ \
-            main.mm \
-            imgui/imgui.cpp \
-            imgui/imgui_draw.cpp \
-            imgui/imgui_widgets.cpp \
-            imgui/imgui_tables.cpp \
-            imgui/backends/imgui_impl_metal.mm \
-            -o BlackRussiaHitbox.dylib
-          
-          echo "✅ Compiled successfully!"
-
-      - name: Verify dylib
-        run: |
-          file BlackRussiaHitbox.dylib
-          otool -L BlackRussiaHitbox.dylib | head -20
-          ls -lh BlackRussiaHitbox.dylib
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit -o main.dylib main.m
 
       - name: Upload built dylib
         uses: actions/upload-artifact@v4
         with:
-          name: BlackRussiaHitbox
-          path: BlackRussiaHitbox.dylib
-          retention-days: 90
+          name: main-dylib
+          path: main.dylib
