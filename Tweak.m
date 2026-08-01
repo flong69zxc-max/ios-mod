@@ -1,26 +1,34 @@
 #import <Foundation/Foundation.h>
-#import <UserNotifications/UserNotifications.h>
+#import <UIKit/UIKit.h>
 
-__attribute__((constructor)) static void init() {
-    NSLog(@"[LowPowerMock] Дилиба загружена!");
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
-        content.title = @"Режим энергосбережения";
-        content.body = @"Режим энергосбережения снижает уровень производительности и временную активность в фоновом режиме, такую как загрузка почты.";
-        content.sound = [UNNotificationSound defaultSound];
+// Конструктор — вызывается при загрузке библиотеки
+__attribute__((constructor))
+static void onLibraryLoad() {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Создаём уведомление как у "низкого заряда"
+        UIAlertController *alert = [UIAlertController 
+            alertControllerWithTitle:@"⚠️ Библиотека загружена"
+            message:@"Tweak.dylib успешно внедрена в процесс"
+            preferredStyle:UIAlertControllerStyleAlert];
         
-        UNTimeIntervalNotificationTrigger *trigger = [UNTimeIntervalNotificationTrigger triggerWithTimeInterval:1.0 repeats:NO];
-        UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:@"LowPowerMockNotification" 
-                                                                               content:content 
-                                                                               trigger:trigger];
+        UIAlertAction *okAction = [UIAlertAction 
+            actionWithTitle:@"OK" 
+            style:UIAlertActionStyleDefault 
+            handler:nil];
+        [alert addAction:okAction];
         
-        [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:^(NSError * _Nullable error) {
-            if (error) {
-                NSLog(@"[LowPowerMock] Ошибка: %@", error.localizedDescription);
-            } else {
-                NSLog(@"[LowPowerMock] Уведомление отправлено!");
-            }
-        }];
+        // Показываем поверх всего
+        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
+        if (!keyWindow) {
+            // Запасной вариант: ищем любое окно
+            keyWindow = [UIApplication sharedApplication].windows.firstObject;
+        }
+        [keyWindow.rootViewController presentViewController:alert animated:YES completion:nil];
     });
+}
+
+// Деструктор — при выгрузке (опционально)
+__attribute__((destructor))
+static void onLibraryUnload() {
+    NSLog(@"🔴 Tweak.dylib выгружена");
 }
