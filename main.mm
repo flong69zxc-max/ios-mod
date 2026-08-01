@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed compilation errors
+// Ultra detailed logging with exact pattern search
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -17,22 +17,25 @@ typedef struct {
     const char *name;
     uint32_t original;
     uint32_t patched;
+    float originalFloat;
+    float patchedFloat;
 } HitboxValue;
 
 static HitboxValue gHitboxes[] = {
-    {"HEAD",        0x3E19999A, 0x3E666666},
-    {"TORSO_1",     0x3E4CCCCD, 0x3E99999A},
-    {"TORSO_2",     0x3E800000, 0x3EC00000},
-    {"MID",         0x3E800000, 0x3EC00000},
-    {"LEFTARM",     0x3E24E148, 0x3E74E148},
-    {"RIGHTARM",    0x3E24E148, 0x3E74E148},
-    {"LEFTLEG_1",   0x3E4CCCCD, 0x3E99999A},
-    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3E99999A},
-    {"LEFTLEG_2",   0x3E19999A, 0x3E666666},
-    {"RIGHTLEG_2",  0x3E19999A, 0x3E666666}
+    {"HEAD",        0x3E19999A, 0x3E666666, 0.15f, 0.225f},
+    {"TORSO_1",     0x3E4CCCCD, 0x3E99999A, 0.20f, 0.30f},
+    {"TORSO_2",     0x3E800000, 0x3EC00000, 0.25f, 0.375f},
+    {"MID",         0x3E800000, 0x3EC00000, 0.25f, 0.375f},
+    {"LEFTARM",     0x3E24E148, 0x3E74E148, 0.16f, 0.24f},
+    {"RIGHTARM",    0x3E24E148, 0x3E74E148, 0.16f, 0.24f},
+    {"LEFTLEG_1",   0x3E4CCCCD, 0x3E99999A, 0.20f, 0.30f},
+    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3E99999A, 0.20f, 0.30f},
+    {"LEFTLEG_2",   0x3E19999A, 0x3E666666, 0.15f, 0.225f},
+    {"RIGHTLEG_2",  0x3E19999A, 0x3E666666, 0.15f, 0.225f}
 };
 #define HITBOX_COUNT (sizeof(gHitboxes)/sizeof(gHitboxes[0]))
 #define STEP_SIZE 0x20
+#define PADDING_SIZE 0x1C
 
 // ============================================================
 // 2. Logging helper
@@ -75,12 +78,31 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 3. Forward declaration
+// 3. Hex dump helper
+// ============================================================
+static NSString *hexDump(vm_address_t addr, size_t length) {
+    NSMutableString *hex = [NSMutableString string];
+    uint8_t buffer[256];
+    size_t toRead = length > 256 ? 256 : length;
+    
+    if (!read_memory(addr, buffer, toRead)) {
+        return @"[CAN'T READ]";
+    }
+    
+    for (size_t i = 0; i < toRead; i++) {
+        [hex appendFormat:@"%02X ", buffer[i]];
+        if ((i + 1) % 16 == 0) [hex appendString:@"\n              "];
+    }
+    return hex;
+}
+
+// ============================================================
+// 4. Forward declaration
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle);
 
 // ============================================================
-// 4. Memory helpers
+// 5. Memory helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -88,31 +110,44 @@ static BOOL read_memory(vm_address_t addr, void *buffer, size_t size) {
     vm_size_t outSize = 0;
     kern_return_t kr = vm_read_overwrite(gTask, addr, size,
                                          (vm_address_t)buffer, &outSize);
-    return (kr == KERN_SUCCESS && outSize == size);
+    if (kr != KERN_SUCCESS) {
+        write_log(@"    ⚠️ READ FAILED at 0x%llX: %s", (unsigned long long)addr, mach_error_string(kr));
+        return NO;
+    }
+    return YES;
 }
 
 static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
     kern_return_t kr = vm_write(gTask, addr, (vm_offset_t)buffer, size);
-    return (kr == KERN_SUCCESS);
+    if (kr != KERN_SUCCESS) {
+        write_log(@"    ⚠️ WRITE FAILED at 0x%llX: %s", (unsigned long long)addr, mach_error_string(kr));
+        return NO;
+    }
+    return YES;
 }
 
 // ============================================================
-// 5. Find blackrussia-client framework
+// 6. Find blackrussia-client framework
 // ============================================================
 typedef struct {
     vm_address_t addr;
     vm_size_t size;
     const char *path;
+    intptr_t slide;
 } MemoryRegion;
 
 static MemoryRegion find_blackrussia_client(void) {
-    MemoryRegion result = {0, 0, NULL};
+    MemoryRegion result = {0, 0, NULL, 0};
     
     write_log(@"");
-    write_log(@"=== LOOKING FOR blackrussia-client.framework ===");
+    write_log(@"╔═══════════════════════════════════════════════════════════╗");
+    write_log(@"║              SEARCHING FOR blackrussia-client            ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════╝");
+    write_log(@"");
     
     uint32_t imageCount = _dyld_image_count();
-    write_log(@"Total loaded images: %d", imageCount);
+    write_log(@"📊 Total loaded images: %d", imageCount);
+    write_log(@"");
     
     for (uint32_t i = 0; i < imageCount; i++) {
         const char *name = _dyld_get_image_name(i);
@@ -121,18 +156,19 @@ static MemoryRegion find_blackrussia_client(void) {
         
         NSString *imageName = [NSString stringWithUTF8String:name];
         
-        // Look specifically for blackrussia-client
         if ([imageName containsString:@"blackrussia-client"] || 
             [imageName containsString:@"blackrussia-client.framework"]) {
             
-            write_log(@"");
             write_log(@"🎯 FOUND blackrussia-client!");
-            write_log(@"  Path: %s", name);
-            write_log(@"  Header: 0x%llX", (unsigned long long)header);
-            write_log(@"  Slide: 0x%lX", (unsigned long)slide);
-            write_log(@"  Image index: %d", i);
+            write_log(@"  ┌─────────────────────────────────────────────");
+            write_log(@"  │ Image index: %d", i);
+            write_log(@"  │ Path: %s", name);
+            write_log(@"  │ Header: 0x%llX", (unsigned long long)header);
+            write_log(@"  │ Slide: 0x%lX", (unsigned long)slide);
+            write_log(@"  └─────────────────────────────────────────────");
+            write_log(@"");
             
-            // Get __DATA segment - fix type
+            // Get __DATA segment
             uint64_t dataSize = 0;
             char *dataPtr = getsectdatafromheader_64(header, "__DATA", "__data", &dataSize);
             
@@ -141,171 +177,196 @@ static MemoryRegion find_blackrussia_client(void) {
                 result.addr = dataAddr;
                 result.size = (vm_size_t)dataSize;
                 result.path = name;
+                result.slide = slide;
                 
+                write_log(@"📁 __DATA.__data section found:");
+                write_log(@"  ┌─────────────────────────────────────────────");
+                write_log(@"  │ Address: 0x%llX", (unsigned long long)dataAddr);
+                write_log(@"  │ Size: 0x%llX (%llu bytes)", (unsigned long long)dataSize, (unsigned long long)dataSize);
+                write_log(@"  │ Range: 0x%llX - 0x%llX", (unsigned long long)dataAddr, (unsigned long long)(dataAddr + dataSize));
+                write_log(@"  └─────────────────────────────────────────────");
                 write_log(@"");
-                write_log(@"  __DATA.__data section:");
-                write_log(@"    Address: 0x%llX", (unsigned long long)dataAddr);
-                write_log(@"    Size: 0x%llX (%llu bytes)", (unsigned long long)dataSize, (unsigned long long)dataSize);
                 
-                // Also try __DATA_CONST
-                uint64_t constSize = 0;
-                char *constPtr = getsectdatafromheader_64(header, "__DATA_CONST", "__const", &constSize);
-                if (constPtr) {
-                    vm_address_t constAddr = (vm_address_t)constPtr + slide;
-                    write_log(@"");
-                    write_log(@"  __DATA_CONST.__const section:");
-                    write_log(@"    Address: 0x%llX", (unsigned long long)constAddr);
-                    write_log(@"    Size: 0x%llX", (unsigned long long)constSize);
-                }
+                // Dump first 64 bytes of data section
+                write_log(@"📄 First 64 bytes of __DATA.__data:");
+                write_log(@"  %@", hexDump(dataAddr, 64));
+                write_log(@"");
                 
                 return result;
             } else {
-                write_log(@"  ⚠️ Could not find __DATA.__data section");
+                write_log(@"⚠️ Could not find __DATA.__data section");
                 write_log(@"  Trying to scan the whole image...");
                 
-                // If we can't find data section, scan the whole image
                 result.addr = (vm_address_t)header + slide;
-                result.size = 0x1000000; // 16MB - approximate size
+                result.size = 0x2000000; // 32MB
                 result.path = name;
+                result.slide = slide;
                 return result;
             }
         }
     }
     
-    // If not found, try to find any Black Russia related image
-    for (uint32_t i = 0; i < imageCount; i++) {
-        const char *name = _dyld_get_image_name(i);
-        NSString *imageName = [NSString stringWithUTF8String:name];
-        
-        if ([imageName containsString:@"black"] || 
-            [imageName containsString:@"Black"] ||
-            [imageName containsString:@"russia"] ||
-            [imageName containsString:@"Russia"]) {
-            
-            write_log(@"");
-            write_log(@"🔍 Found potential Black Russia image: %s", name);
-            const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
-            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-            
-            result.addr = (vm_address_t)header + slide;
-            result.size = 0x1000000;
-            result.path = name;
-            return result;
-        }
-    }
-    
-    write_log(@"❌ blackrussia-client not found!");
+    write_log(@"❌ blackrussia-client NOT FOUND!");
     return result;
 }
 
 // ============================================================
-// 6. Scan for pattern
+// 7. Exact pattern search with detailed logging
 // ============================================================
-static vm_address_t scan_for_pattern(vm_address_t start, vm_size_t size) {
+static vm_address_t find_exact_pattern(vm_address_t start, vm_size_t size) {
     if (start == 0 || size == 0) {
+        write_log(@"❌ Invalid search range");
         return 0;
     }
     
     write_log(@"");
-    write_log(@"=== SCANNING FOR HITBOX PATTERN ===");
-    write_log(@"Address: 0x%llX - 0x%llX (size: 0x%llX)", 
-             (unsigned long long)start, 
-             (unsigned long long)(start + size), 
-             (unsigned long long)size);
-    write_log(@"Looking for HEAD (0x3E19999A) followed by TORSO_1 (0x3E4CCCCD) at +0x20");
+    write_log(@"╔═══════════════════════════════════════════════════════════╗");
+    write_log(@"║           SCANNING FOR EXACT HITBOX PATTERN              ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════╝");
+    write_log(@"");
+    write_log(@"📍 Search range:");
+    write_log(@"  Start: 0x%llX", (unsigned long long)start);
+    write_log(@"  End:   0x%llX", (unsigned long long)(start + size));
+    write_log(@"  Size:  0x%llX (%llu bytes)", (unsigned long long)size, (unsigned long long)size);
+    write_log(@"");
+    write_log(@"🔍 Looking for pattern:");
+    write_log(@"  HEAD:     9A 99 19 3E (%.3f)", gHitboxes[0].originalFloat);
+    write_log(@"  Padding:  28 bytes of zeros");
+    write_log(@"  TORSO_1:  CD CC 4C 3E (%.3f)", gHitboxes[1].originalFloat);
+    write_log(@"  Step:     0x%X between each value", STEP_SIZE);
     write_log(@"");
     
-    uint32_t buf = 0;
+    uint8_t pattern[32] = {
+        0x9A, 0x99, 0x19, 0x3E, // HEAD
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 28 bytes zeros
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0xCD, 0xCC, 0x4C, 0x3E  // TORSO_1
+    };
+    
     int checked = 0;
     int foundCandidates = 0;
+    int readErrors = 0;
     
-    for (vm_address_t addr = start; addr < start + size - 4; addr += 4) {
+    for (vm_address_t addr = start; addr < start + size - 32; addr += 4) {
         checked++;
-        if (checked % 500000 == 0) {
-            write_log(@"  Scanned %d positions, current: 0x%llX", checked, (unsigned long long)addr);
+        
+        if (checked % 100000 == 0) {
+            write_log(@"  📊 Scanned %d positions (%.1f%%)", 
+                     checked, (float)checked / (size / 4) * 100);
         }
         
-        if (!read_memory(addr, &buf, 4)) continue;
+        uint8_t buf[32] = {0};
+        if (!read_memory(addr, buf, 32)) {
+            readErrors++;
+            continue;
+        }
         
-        // Check for HEAD
-        if (buf == gHitboxes[0].original) {
+        // Check exact pattern
+        if (memcmp(buf, pattern, 32) == 0) {
             foundCandidates++;
+            write_log(@"");
+            write_log(@"🎯 Found candidate #%d at 0x%llX", foundCandidates, (unsigned long long)addr);
+            write_log(@"  Pattern matched exactly!");
+            write_log(@"  HEAD:     9A 99 19 3E at 0x%llX", (unsigned long long)addr);
+            write_log(@"  TORSO_1:  CD CC 4C 3E at 0x%llX", (unsigned long long)(addr + 0x20));
+            write_log(@"");
             
-            // Check for TORSO_1 at +0x20
-            vm_address_t torsoAddr = addr + STEP_SIZE;
-            uint32_t torsoBuf = 0;
+            // Verify all 10 values
+            write_log(@"  Verifying all 10 hitboxes:");
+            BOOL allMatch = YES;
             
-            if (read_memory(torsoAddr, &torsoBuf, 4) && torsoBuf == gHitboxes[1].original) {
+            for (int i = 0; i < HITBOX_COUNT; i++) {
+                vm_address_t checkAddr = addr + i * STEP_SIZE;
+                uint32_t checkBuf = 0;
+                
+                if (!read_memory(checkAddr, &checkBuf, 4)) {
+                    write_log(@"    ❌ %s: CAN'T READ at 0x%llX", gHitboxes[i].name, (unsigned long long)checkAddr);
+                    allMatch = NO;
+                    break;
+                }
+                
+                float checkFloat = *(float*)&checkBuf;
+                
+                if (checkBuf == gHitboxes[i].original) {
+                    write_log(@"    ✅ %s: 0x%08X (%.4f) at 0x%llX ✓", 
+                             gHitboxes[i].name, checkBuf, checkFloat, (unsigned long long)checkAddr);
+                } else {
+                    write_log(@"    ❌ %s: expected 0x%08X (%.4f), got 0x%08X (%.4f) at 0x%llX", 
+                             gHitboxes[i].name, 
+                             gHitboxes[i].original, gHitboxes[i].originalFloat,
+                             checkBuf, checkFloat,
+                             (unsigned long long)checkAddr);
+                    allMatch = NO;
+                }
+            }
+            
+            if (allMatch) {
                 write_log(@"");
-                write_log(@"🔍 Found candidate #%d at 0x%llX", foundCandidates, (unsigned long long)addr);
-                write_log(@"   HEAD: 0x%08X", buf);
-                write_log(@"   TORSO_1: 0x%08X at 0x%llX", torsoBuf, (unsigned long long)torsoAddr);
+                write_log(@"╔═══════════════════════════════════════════════════════════╗");
+                write_log(@"║     ✅ ALL 10 HITBOXES VERIFIED SUCCESSFULLY!            ║");
+                write_log(@"╚═══════════════════════════════════════════════════════════╝");
+                write_log(@"");
+                write_log(@"📍 Found at: 0x%llX", (unsigned long long)addr);
+                write_log(@"📊 Total candidates found: %d", foundCandidates);
+                write_log(@"📊 Total positions scanned: %d", checked);
+                write_log(@"");
                 
-                // Verify all 10 values
-                BOOL allMatch = YES;
-                for (int i = 0; i < HITBOX_COUNT; i++) {
-                    vm_address_t checkAddr = addr + i * STEP_SIZE;
-                    uint32_t checkBuf = 0;
-                    
-                    if (!read_memory(checkAddr, &checkBuf, 4)) {
-                        write_log(@"  ✗ Cannot read %s at 0x%llX", gHitboxes[i].name, (unsigned long long)checkAddr);
-                        allMatch = NO;
-                        break;
-                    }
-                    
-                    if (checkBuf != gHitboxes[i].original) {
-                        write_log(@"  ✗ %s: expected 0x%08X, got 0x%08X at 0x%llX", 
-                                 gHitboxes[i].name, gHitboxes[i].original, checkBuf, 
-                                 (unsigned long long)checkAddr);
-                        allMatch = NO;
-                        break;
-                    }
-                    
-                    write_log(@"  ✓ %s: 0x%08X at 0x%llX", 
-                             gHitboxes[i].name, checkBuf, (unsigned long long)checkAddr);
+                // Dump the found area
+                write_log(@"📄 Memory dump around found address:");
+                for (int i = -2; i <= 12; i++) {
+                    vm_address_t dumpAddr = addr + i * STEP_SIZE;
+                    write_log(@"  0x%llX: %@", (unsigned long long)dumpAddr, hexDump(dumpAddr, 16));
                 }
+                write_log(@"");
                 
-                if (allMatch) {
-                    write_log(@"");
-                    write_log(@"✅ ALL 10 HITBOXES VERIFIED!");
-                    return addr;
-                }
+                return addr;
             }
         }
     }
     
     write_log(@"");
-    write_log(@"Scanned %d positions, found %d HEAD candidates", checked, foundCandidates);
-    write_log(@"❌ Full pattern not found");
+    write_log(@"╔═══════════════════════════════════════════════════════════╗");
+    write_log(@"║              ❌ SCAN COMPLETE - NOT FOUND                ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════╝");
+    write_log(@"");
+    write_log(@"📊 Statistics:");
+    write_log(@"  Total positions scanned: %d", checked);
+    write_log(@"  Total HEAD candidates found: %d", foundCandidates);
+    write_log(@"  Read errors: %d", readErrors);
+    write_log(@"");
+    
     return 0;
 }
 
 // ============================================================
-// 7. Main patching logic
+// 8. Main patching logic with detailed logging
 // ============================================================
 static void patch_hitboxes(void) {
     write_log(@"");
-    write_log(@"╔══════════════════════════════════════════════╗");
-    write_log(@"║    BLACK RUSSIA HITBOX PATCHER v3.1        ║");
-    write_log(@"║      Targeting blackrussia-client           ║");
-    write_log(@"╚══════════════════════════════════════════════╝");
+    write_log(@"╔═══════════════════════════════════════════════════════════╗");
+    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v5.0                 ║");
+    write_log(@"║        Exact Pattern Scanner + Ultra Logging             ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
     gTask = mach_task_self();
-    write_log(@"Task port: %d", gTask);
+    write_log(@"🔑 Task port: %d", gTask);
+    write_log(@"");
     
     // Find blackrussia-client
     MemoryRegion brClient = find_blackrussia_client();
     
     if (brClient.addr == 0 || brClient.size == 0) {
         write_log(@"");
-        write_log(@"❌ COULD NOT FIND blackrussia-client!");
+        write_log(@"❌ CRITICAL: blackrussia-client NOT FOUND!");
         show_notification(@"blackrussia-client not found.", @"Check HitBoxes.log");
         return;
     }
     
-    // Scan for pattern
-    vm_address_t found = scan_for_pattern(brClient.addr, brClient.size);
+    // Search for pattern
+    vm_address_t found = find_exact_pattern(brClient.addr, brClient.size);
     
     if (!found) {
         write_log(@"");
@@ -314,13 +375,13 @@ static void patch_hitboxes(void) {
         return;
     }
     
+    // Patch all values
     write_log(@"");
-    write_log(@"╔══════════════════════════════════════════════╗");
-    write_log(@"║        PATCHING HITBOXES                    ║");
-    write_log(@"╚══════════════════════════════════════════════╝");
+    write_log(@"╔═══════════════════════════════════════════════════════════╗");
+    write_log(@"║              APPLYING PATCHES                            ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
-    // Patch all values
     BOOL success = YES;
     for (int i = 0; i < HITBOX_COUNT; i++) {
         vm_address_t patchAddr = found + i * STEP_SIZE;
@@ -332,13 +393,15 @@ static void patch_hitboxes(void) {
         float originalFloat = *(float*)&originalValue;
         float newFloat = *(float*)&newValue;
         
-        write_log(@"Patching %s at 0x%llX:", gHitboxes[i].name, (unsigned long long)patchAddr);
+        write_log(@"📝 Patching %s:", gHitboxes[i].name);
+        write_log(@"  Address:  0x%llX", (unsigned long long)patchAddr);
         write_log(@"  Original: 0x%08X (%.4f)", originalValue, originalFloat);
         write_log(@"  New:      0x%08X (%.4f)", newValue, newFloat);
+        write_log(@"  Change:   %.4f -> %.4f (x%.2f)", originalFloat, newFloat, newFloat/originalFloat);
         
         if (!write_memory(patchAddr, &newValue, 4)) {
             success = NO;
-            write_log(@"  ✗ WRITE FAILED!");
+            write_log(@"  ❌ WRITE FAILED!");
             break;
         }
         
@@ -346,31 +409,36 @@ static void patch_hitboxes(void) {
         uint32_t verifyValue = 0;
         read_memory(patchAddr, &verifyValue, 4);
         if (verifyValue == newValue) {
-            write_log(@"  ✓ SUCCESS");
+            write_log(@"  ✅ VERIFIED");
         } else {
-            write_log(@"  ✗ VERIFY FAILED! Expected 0x%08X got 0x%08X", newValue, verifyValue);
+            write_log(@"  ❌ VERIFY FAILED! Expected 0x%08X got 0x%08X", newValue, verifyValue);
             success = NO;
             break;
         }
+        write_log(@"");
     }
     
     write_log(@"");
     if (success) {
-        write_log(@"╔══════════════════════════════════════════════╗");
-        write_log(@"║        ✓ ALL HITBOXES PATCHED!             ║");
-        write_log(@"╚══════════════════════════════════════════════╝");
+        write_log(@"╔═══════════════════════════════════════════════════════════╗");
+        write_log(@"║     ✅ ALL 10 HITBOXES PATCHED SUCCESSFULLY!             ║");
+        write_log(@"╚═══════════════════════════════════════════════════════════╝");
+        write_log(@"");
+        write_log(@"📍 Base address: 0x%llX", (unsigned long long)found);
+        write_log(@"📊 Patched %d values", HITBOX_COUNT);
+        
         NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX", (unsigned long long)found];
         show_notification(@"Hitboxes patched successfully!", msg);
     } else {
-        write_log(@"╔══════════════════════════════════════════════╗");
-        write_log(@"║        ❌ PATCH FAILED!                    ║");
-        write_log(@"╚══════════════════════════════════════════════╝");
+        write_log(@"╔═══════════════════════════════════════════════════════════╗");
+        write_log(@"║              ❌ PATCH FAILED!                            ║");
+        write_log(@"╚═══════════════════════════════════════════════════════════╝");
         show_notification(@"Patch failed.", @"Check HitBoxes.log");
     }
 }
 
 // ============================================================
-// 8. Notification display
+// 9. Notification display
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -392,7 +460,6 @@ static void show_notification(NSString *title, NSString *subtitle) {
         
         if (!window) {
             if (@available(iOS 13.0, *)) {
-                // Try to get any window from scenes
                 for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                     if ([scene isKindOfClass:[UIWindowScene class]]) {
                         NSArray *windows = scene.windows;
@@ -428,15 +495,19 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 9. Entry point
+// 10. Entry point
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
-    write_log(@"╔══════════════════════════════════════════════╗");
-    write_log(@"║   BLACK RUSSIA HITBOX PATCHER INJECTED     ║");
-    write_log(@"║   Target: blackrussia-client.framework     ║");
-    write_log(@"╚══════════════════════════════════════════════╝");
-    write_log(@"Waiting 5 seconds for Black Russia to fully load...");
+    write_log(@"");
+    write_log(@"╔═══════════════════════════════════════════════════════════╗");
+    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v5.0 INJECTED          ║");
+    write_log(@"║      Target: blackrussia-client.framework               ║");
+    write_log(@"║      Pattern: HEAD + 28 zeros + TORSO_1                 ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════╝");
+    write_log(@"");
+    write_log(@"⏳ Waiting 5 seconds for Black Russia to fully load...");
+    write_log(@"");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
@@ -445,7 +516,7 @@ static void initialize(void) {
 }
 
 // ============================================================
-// 10. Dummy export
+// 11. Dummy export
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
