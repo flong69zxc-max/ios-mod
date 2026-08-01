@@ -32,8 +32,10 @@ HitboxPatch patches[] = {
 #define STEP_SIZE 0x20
 
 static UIWindow *alertWindow = nil;
+static uint32_t arm64_offset = 0;
+static size_t arm64_size = 0;
 
-void showNotification(NSString *title, NSString *message) {
+void showNotificationAndWait(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
         alertWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
         alertWindow.rootViewController = [[UIViewController alloc] init];
@@ -51,11 +53,14 @@ void showNotification(NSString *title, NSString *message) {
             handler:^(UIAlertAction *action) {
                 alertWindow.hidden = YES;
                 alertWindow = nil;
+                CFRunLoopStop(CFRunLoopGetMain());
             }];
         
         [alert addAction:okAction];
         [alertWindow.rootViewController presentViewController:alert animated:YES completion:nil];
     });
+    
+    CFRunLoopRun();
 }
 
 NSString* getTargetPath() {
@@ -76,7 +81,7 @@ NSString* getTargetPath() {
     return nil;
 }
 
-BOOL isValidArchitecture(void *data) {
+BOOL isValidArchitecture(void *data, size_t fileSize) {
     uint32_t magic = *(uint32_t *)data;
     
     if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
@@ -85,6 +90,8 @@ BOOL isValidArchitecture(void *data) {
         
         for (uint32_t i = 0; i < OSSwapBigToHostInt32(fat->nfat_arch); i++) {
             if (OSSwapBigToHostInt32(arch[i].cputype) == CPU_TYPE_ARM64) {
+                arm64_offset = OSSwapBigToHostInt32(arch[i].offset);
+                arm64_size = OSSwapBigToHostInt32(arch[i].size);
                 return YES;
             }
         }
@@ -92,8 +99,9 @@ BOOL isValidArchitecture(void *data) {
     }
     
     if (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) {
-        struct mach_header_64 *header = (struct mach_header_64 *)data;
-        return header->cputype == CPU_TYPE_ARM64;
+        arm64_offset = 0;
+        arm64_size = fileSize;
+        return ((struct mach_header_64 *)data)->cputype == CPU_TYPE_ARM64;
     }
     
     return NO;
@@ -101,30 +109,30 @@ BOOL isValidArchitecture(void *data) {
 
 int main(int argc, const char * argv[]) {
     @autoreleasepool {
-        showNotification(@"Hitbox Patcher", @"🔍 Поиск хитбоксов...");
+        showNotificationAndWait(@"Hitbox Patcher", @"🔍 Поиск хитбоксов...");
         
         NSString *targetPath = getTargetPath();
         if (!targetPath) {
-            showNotification(@"Ошибка", @"Файл blackrussia-client не найден в приложении");
+            showNotificationAndWait(@"Ошибка", @"Файл blackrussia-client не найден в приложении");
             return 1;
         }
         
         const char *pathCString = [targetPath UTF8String];
         
         if (access(pathCString, F_OK) != 0) {
-            showNotification(@"Ошибка", [NSString stringWithFormat:@"Файл не найден:\n%@", targetPath]);
+            showNotificationAndWait(@"Ошибка", [NSString stringWithFormat:@"Файл не найден:\n%@", targetPath]);
             return 1;
         }
         
         int fd = open(pathCString, O_RDWR);
         if (fd == -1) {
-            showNotification(@"Ошибка", @"Нет прав на запись в файл");
+            showNotificationAndWait(@"Ошибка", @"Нет прав на запись в файл");
             return 1;
         }
         
         struct stat st;
         if (fstat(fd, &st) != 0) {
-            showNotification(@"Ошибка", @"Не удалось получить размер файла");
+            showNotificationAndWait(@"Ошибка", @"Не удалось получить размер файла");
             close(fd);
             return 1;
         }
@@ -132,26 +140,28 @@ int main(int argc, const char * argv[]) {
         
         void *mapped = mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (mapped == MAP_FAILED) {
-            showNotification(@"Ошибка", @"Не удалось отобразить файл в память");
+            showNotificationAndWait(@"Ошибка", @"Не удалось отобразить файл в память");
             close(fd);
             return 1;
         }
         
-        if (!isValidArchitecture(mapped)) {
-            showNotification(@"Ошибка", @"Файл не содержит ARM64 код");
+        if (!isValidArchitecture(mapped, fileSize)) {
+            showNotificationAndWait(@"Ошибка", @"Файл не содержит ARM64 код");
             munmap(mapped, fileSize);
             close(fd);
             return 1;
         }
         
-        unsigned char *data = (unsigned char *)mapped;
+        unsigned char *data = (unsigned char *)mapped + arm64_offset;
+        size_t dataSize = arm64_size > 0 ? arm64_size : fileSize - arm64_offset;
+        
         NSMutableArray *foundOffsets = [NSMutableArray array];
         NSMutableString *logMessage = [NSMutableString string];
         BOOL allFound = YES;
         
         for (int i = 0; i < NUM_PATCHES; i++) {
             const unsigned char *pattern = patches[i].original;
-            size_t searchLimit = fileSize - 4;
+            size_t searchLimit = dataSize - 4;
             BOOL found = NO;
             
             for (size_t offset = 0; offset < searchLimit; offset++) {
@@ -173,7 +183,7 @@ int main(int argc, const char * argv[]) {
             
             if (!found) {
                 allFound = NO;
-                showNotification(@"Ошибка", [NSString stringWithFormat:@"Хитбокс %s не найден", patches[i].name]);
+                showNotificationAndWait(@"Ошибка", [NSString stringWithFormat:@"Хитбокс %s не найден", patches[i].name]);
                 break;
             }
         }
@@ -185,7 +195,7 @@ int main(int argc, const char * argv[]) {
         }
         
         [logMessage insertString:@"✅ Найдены все хитбоксы:\n" atIndex:0];
-        showNotification(@"Хитбоксы найдены!", logMessage);
+        showNotificationAndWait(@"Хитбоксы найдены!", logMessage);
         
         NSString *backupPath = [targetPath stringByAppendingString:@".backup"];
         if (![[NSFileManager defaultManager] fileExistsAtPath:backupPath]) {
@@ -197,19 +207,24 @@ int main(int argc, const char * argv[]) {
             size_t offset = [foundOffsets[i] unsignedLongValue];
             const unsigned char *patch = patches[i].patched;
             memcpy(data + offset, patch, 4);
+            
+            if (memcmp(data + offset, patch, 4) != 0) {
+                showNotificationAndWait(@"Ошибка", [NSString stringWithFormat:@"Не удалось применить патч %s", patches[i].name]);
+                munmap(mapped, fileSize);
+                close(fd);
+                return 1;
+            }
         }
         
         if (msync(mapped, fileSize, MS_SYNC) != 0) {
-            showNotification(@"Предупреждение", @"Изменения могут не сохраниться");
+            showNotificationAndWait(@"Предупреждение", @"Изменения могут не сохраниться");
         }
         
         munmap(mapped, fileSize);
         close(fd);
         
-        showNotification(@"✅ Готово!", 
+        showNotificationAndWait(@"✅ Готово!", 
             [NSString stringWithFormat:@"Все 10 хитбоксов запатчены ×1.5\nБэкап: %@", backupPath]);
-        
-        sleep(2);
     }
     return 0;
 }
