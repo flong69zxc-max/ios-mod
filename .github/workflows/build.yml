@@ -1,32 +1,24 @@
-name: Build Raw .dylib for iOS
+типо такого: name: Build iOS dylib
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main", "master" ]
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Build dylib via Makefile
-      run: |
-        xcodebuild -create-xcframework \
-          -library build/libMyLib.dylib \
-          -headers include \
-          -output MyLib.xcframework
+      - name: Compile to dylib (arm64 iOS)
+        run: |
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit -o mylib.dylib main.m
 
-    - name: Extract raw dylib
-      run: |
-        cp build/Release-iphoneos/libMyLib.dylib ./MyLib.dylib
-
-    - name: Sign dylib with ad-hoc
-      run: |
-        codesign -f -s - ./MyLib.dylib
-
-    - name: Upload .dylib
-      uses: actions/upload-artifact@v4
-      with:
-        name: Tweak.dylib
-        path: Tweak.dylib
+      - name: Upload built dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: Tweak
+          path: Tweak.dylib
