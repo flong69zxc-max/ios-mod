@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Shows RELATIVE address in logs and notification
+// Fixed relative address display
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -40,7 +40,7 @@ static HitboxValue gHitboxes[] = {
 // ============================================================
 // 2. Global variables
 // ============================================================
-static vm_address_t gFrameworkBase = 0;  // Base address of blackrussia-client
+static vm_address_t gFrameworkBase = 0;
 static const char *gFrameworkPath = NULL;
 
 // ============================================================
@@ -213,7 +213,7 @@ static vm_address_t find_blackrussia_framework(void) {
 // ============================================================
 // 8. Search with float tolerance
 // ============================================================
-static vm_address_t find_hitboxes(vm_address_t *outRelativeAddr) {
+static vm_address_t find_hitboxes(uint64_t *outRelativeAddr) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
     write_log(@"║       SEARCHING HITBOXES (float tolerance: %.3f)        ║", TOLERANCE);
@@ -279,17 +279,14 @@ static vm_address_t find_hitboxes(vm_address_t *outRelativeAddr) {
             if (allMatch && matched == HITBOX_COUNT) {
                 candidates++;
                 
-                // Calculate relative address
-                vm_address_t relativeAddr = addr - gFrameworkBase;
+                // Calculate relative address (unsigned 64-bit)
+                uint64_t relativeAddr = (uint64_t)(addr - gFrameworkBase);
                 *outRelativeAddr = relativeAddr;
                 
                 write_log(@"");
                 write_log(@"🎯 Found candidate #%d at:", candidates);
                 write_log(@"  Absolute: 0x%llX", (unsigned long long)addr);
-                write_log(@"  Relative: 0x%llX (0x%llX - 0x%llX)", 
-                         (unsigned long long)relativeAddr,
-                         (unsigned long long)addr,
-                         (unsigned long long)gFrameworkBase);
+                write_log(@"  Relative: 0x%llX", (unsigned long long)relativeAddr);
                 write_log(@"  Section: %s", sectName);
                 write_log(@"");
                 write_log(@"📋 Verified values:");
@@ -352,7 +349,7 @@ static void patch_hitboxes(void) {
         return;
     }
     
-    vm_address_t relativeAddr = 0;
+    uint64_t relativeAddr = 0;
     vm_address_t found = find_hitboxes(&relativeAddr);
     
     if (!found) {
@@ -380,7 +377,6 @@ static void patch_hitboxes(void) {
         
         write_log(@"📝 %s:", gHitboxes[i].name);
         write_log(@"  Absolute: 0x%llX", (unsigned long long)patchAddr);
-        write_log(@"  Relative: 0x%llX", (unsigned long long)(patchAddr - gFrameworkBase));
         write_log(@"  Original: 0x%08X (%.3f)", originalValue, originalFloat);
         write_log(@"  New:      0x%08X (%.3f) x2", newValue, newFloat);
         
@@ -409,6 +405,7 @@ static void patch_hitboxes(void) {
         write_log(@"║     Relative offset: 0x%llX                            ║", (unsigned long long)relativeAddr);
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
         
+        // Use stringWithFormat with unsigned long long to avoid sign extension
         NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX\nx2 Hitboxes active!", 
                         (unsigned long long)relativeAddr];
         show_notification(@"Hitboxes patched successfully!", msg);
