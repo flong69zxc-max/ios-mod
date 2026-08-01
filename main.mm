@@ -1,18 +1,18 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Dynamic library injection entry point
+// Fixed for iOS SDK compatibility
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
-#import <UserNotifications/UserNotifications.h>
+#import <dlfcn.h>
 
 // ============================================================
 // 1. Original hitbox float values (little-endian hex)
 // ============================================================
 typedef struct {
     const char *name;
-    uint32_t original[4];  // up to 4 bytes (float hex)
+    uint32_t original[4];
     uint32_t patched[4];
     size_t len;
 } HitboxPattern;
@@ -36,17 +36,17 @@ static HitboxPattern gPatterns[] = {
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
-// Read memory safely
+// Read memory safely using vm_read_overwrite
 static BOOL read_memory(vm_address_t addr, void *buffer, size_t size) {
     vm_size_t outSize = 0;
-    kern_return_t kr = mach_vm_read_overwrite(gTask, addr, size,
-                                              (vm_address_t)buffer, &outSize);
+    kern_return_t kr = vm_read_overwrite(gTask, addr, size,
+                                         (vm_address_t)buffer, &outSize);
     return (kr == KERN_SUCCESS && outSize == size);
 }
 
-// Write memory safely
+// Write memory safely using vm_write
 static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
-    kern_return_t kr = mach_vm_write(gTask, addr, (vm_offset_t)buffer, size);
+    kern_return_t kr = vm_write(gTask, addr, (vm_offset_t)buffer, size);
     return (kr == KERN_SUCCESS);
 }
 
@@ -73,34 +73,57 @@ static vm_address_t find_pattern_with_step(vm_address_t start, vm_size_t size,
     return 0;
 }
 
+// Get all readable memory regions
+static void get_regions(vm_address_t *outBase, vm_size_t *outSize) {
+    vm_address_t address = 0;
+    vm_size_t size = 0;
+    struct vm_region_submap_info_64 info;
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+    natural_t depth = 0;
+    
+    // Use vm_region_recurse_64 with proper parameters
+    kern_return_t kr = vm_region_recurse_64(gTask, &address, &size, &depth,
+                                            (vm_region_info_t)&info, &count);
+    if (kr == KERN_SUCCESS) {
+        *outBase = address;
+        *outSize = size;
+    } else {
+        *outBase = 0;
+        *outSize = 0;
+    }
+}
+
 // ============================================================
 // 3. Main patching logic
 // ============================================================
 static void patch_hitboxes(void) {
     gTask = mach_task_self();
     
-    // Get the main executable's region (__TEXT segment)
     vm_address_t base = 0;
     vm_size_t size = 0;
-    struct vm_region_submap_info_64 info;
-    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
-    kern_return_t kr = vm_region_recurse_64(gTask, &base, &size, &count,
-                                            (vm_region_info_t)&info);
-    if (kr != KERN_SUCCESS) {
-        NSLog(@"Failed to get region");
+    get_regions(&base, &size);
+    
+    if (base == 0 || size == 0) {
+        show_notification(@"Hitboxes not found.", @"");
         return;
     }
     
-    // Scan from base to base+size (simplified - real would scan all regions)
-    // For demo we scan a reasonable range (0x100000000 is 4GB)
+    // Scan memory in chunks
     vm_address_t found = 0;
-    for (vm_address_t addr = base; addr < base + size; addr += 0x1000) {
-        vm_address_t hit = find_pattern_with_step(addr, 0x1000,
+    vm_address_t scanAddr = base;
+    vm_size_t chunkSize = 0x100000; // 1MB chunks
+    
+    while (scanAddr < base + size) {
+        vm_size_t remaining = base + size - scanAddr;
+        vm_size_t currentSize = remaining < chunkSize ? remaining : chunkSize;
+        
+        vm_address_t hit = find_pattern_with_step(scanAddr, currentSize,
                                                   gPatterns[0].original[0], 0x20);
         if (hit) {
             found = hit;
             break;
         }
+        scanAddr += currentSize;
     }
     
     if (!found) {
@@ -127,15 +150,36 @@ static void patch_hitboxes(void) {
 }
 
 // ============================================================
-// 4. Notification display (UIAlertController / CFUserNotification)
+// 4. Notification display (UIAlertController)
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
-        UIViewController *rootVC = keyWindow.rootViewController;
+        UIWindow *window = nil;
+        
+        // Find a window (iOS 13+ compatible)
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in scene.windows) {
+                        if (w.isKeyWindow) {
+                            window = w;
+                            break;
+                        }
+                    }
+                    if (window) break;
+                }
+            }
+        }
+        
+        if (!window) {
+            // Fallback for older iOS
+            window = [UIApplication sharedApplication].windows.firstObject;
+        }
+        
+        UIViewController *rootVC = window.rootViewController;
         
         if (rootVC) {
-            // Use UIAlertController if we have a window
+            // Use UIAlertController
             UIAlertController *alert = [UIAlertController
                 alertControllerWithTitle:title
                 message:subtitle
@@ -145,16 +189,8 @@ static void show_notification(NSString *title, NSString *subtitle) {
                                                     handler:nil]];
             [rootVC presentViewController:alert animated:YES completion:nil];
         } else {
-            // Fallback to CFUserNotification (works even without UI)
-            CFUserNotificationDisplayAlert(
-                0,  // timeout (0 = no timeout)
-                kCFUserNotificationStopAlertLevel,
-                NULL, NULL, NULL,
-                (__bridge CFStringRef)title,
-                (__bridge CFStringRef)subtitle,
-                CFSTR("OK"), NULL, NULL,
-                NULL
-            );
+            // Fallback to NSLog if no UI available
+            NSLog(@"%@: %@", title, subtitle);
         }
     });
 }
@@ -175,3 +211,10 @@ static void initialize(void) {
 // 6. Dummy export to avoid stripping
 // ============================================================
 extern "C" void __dummy_export(void) {}
+
+// ============================================================
+// Compile with:
+// xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
+//   -framework Foundation -framework UIKit \
+//   -o mylib.dylib main.mm
+// ============================================================
