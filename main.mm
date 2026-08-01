@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Specifically targets blackrussia-client.framework
+// Fixed compilation errors
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -132,14 +132,14 @@ static MemoryRegion find_blackrussia_client(void) {
             write_log(@"  Slide: 0x%lX", (unsigned long)slide);
             write_log(@"  Image index: %d", i);
             
-            // Get __DATA segment
-            unsigned long dataSize = 0;
-            uint8_t *dataPtr = getsectdatafromheader_64(header, "__DATA", "__data", &dataSize);
+            // Get __DATA segment - fix type
+            uint64_t dataSize = 0;
+            char *dataPtr = getsectdatafromheader_64(header, "__DATA", "__data", &dataSize);
             
             if (dataPtr) {
                 vm_address_t dataAddr = (vm_address_t)dataPtr + slide;
                 result.addr = dataAddr;
-                result.size = dataSize;
+                result.size = (vm_size_t)dataSize;
                 result.path = name;
                 
                 write_log(@"");
@@ -148,8 +148,8 @@ static MemoryRegion find_blackrussia_client(void) {
                 write_log(@"    Size: 0x%llX (%llu bytes)", (unsigned long long)dataSize, (unsigned long long)dataSize);
                 
                 // Also try __DATA_CONST
-                unsigned long constSize = 0;
-                uint8_t *constPtr = getsectdatafromheader_64(header, "__DATA_CONST", "__const", &constSize);
+                uint64_t constSize = 0;
+                char *constPtr = getsectdatafromheader_64(header, "__DATA_CONST", "__const", &constSize);
                 if (constPtr) {
                     vm_address_t constAddr = (vm_address_t)constPtr + slide;
                     write_log(@"");
@@ -212,7 +212,7 @@ static vm_address_t scan_for_pattern(vm_address_t start, vm_size_t size) {
              (unsigned long long)start, 
              (unsigned long long)(start + size), 
              (unsigned long long)size);
-    write_log(@"Looking for HEAD (0x3E19999A) at 0x%llX", (unsigned long long)start);
+    write_log(@"Looking for HEAD (0x3E19999A) followed by TORSO_1 (0x3E4CCCCD) at +0x20");
     write_log(@"");
     
     uint32_t buf = 0;
@@ -391,9 +391,22 @@ static void show_notification(NSString *title, NSString *subtitle) {
         }
         
         if (!window) {
-            NSArray *windows = [UIApplication sharedApplication].windows;
-            if (windows.count > 0) {
-                window = windows.firstObject;
+            if (@available(iOS 13.0, *)) {
+                // Try to get any window from scenes
+                for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        NSArray *windows = scene.windows;
+                        if (windows.count > 0) {
+                            window = windows.firstObject;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                NSArray *windows = [UIApplication sharedApplication].windows;
+                if (windows.count > 0) {
+                    window = windows.firstObject;
+                }
             }
         }
         
