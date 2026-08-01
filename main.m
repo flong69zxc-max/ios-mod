@@ -34,20 +34,28 @@ static const float news[10] = {0.225f,0.30f,0.375f,0.375f,0.24f,0.24f,0.30f,0.30
 static const char *names[10] = {"HEAD","TORSO_1","TORSO_2","LEGS_1","LEGS_2","ARMS_1","ARMS_2","CHEST","STOMACH","PELVIS"};
 
 static void log_to_file(const char *msg) {
-    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    NSString *doc = [paths firstObject];
-    NSString *saves = [doc stringByAppendingPathComponent:@"saves"];
-    [[NSFileManager defaultManager] createDirectoryAtPath:saves withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString *logPath = [saves stringByAppendingPathComponent:@"hitbox_patch.log"];
-    FILE *f = fopen([logPath UTF8String], "a");
-    if (f) {
-        time_t t = time(NULL);
-        struct tm *tm = localtime(&t);
-        char ts[20];
-        strftime(ts, sizeof(ts), "%H:%M:%S", tm);
-        fprintf(f, "[%s] %s\n", ts, msg);
-        fclose(f);
+    // Пробуем несколько путей
+    const char *paths[] = {
+        "/var/mobile/hitbox_patch.log",
+        "/tmp/hitbox_patch.log",
+        NULL
+    };
+    FILE *f = NULL;
+    for (int i = 0; paths[i] != NULL; i++) {
+        f = fopen(paths[i], "a");
+        if (f) break;
     }
+    if (!f) {
+        // Если не удалось открыть, просто выводим в консоль
+        printf("[LOG] %s\n", msg);
+        return;
+    }
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    char ts[20];
+    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+    fprintf(f, "[%s] %s\n", ts, msg);
+    fclose(f);
 }
 
 static void show_alert(const char *title, const char *msg) {
@@ -112,8 +120,10 @@ static void* find_hitbox(const char *libname, long *offset) {
     return NULL;
 }
 
-__attribute__((constructor)) static void patch(void) {
-    // Ждём загрузки библиотек
+static void patch(void) {
+    log_to_file("=== ПАТЧ ЗАПУЩЕН ===");
+    
+    // Ждём загрузки библиотек (макс 5 сек)
     for (int attempts = 0; attempts < 10; attempts++) {
         long offset = 0;
         void *addr = find_hitbox("blackrussia-client", &offset);
@@ -126,13 +136,12 @@ __attribute__((constructor)) static void patch(void) {
             snprintf(log_buf, sizeof(log_buf), "Найдено по адресу: %p (смещение: 0x%lX)", addr, offset);
             log_to_file(log_buf);
             
-            // Запоминаем старые значения подробно
             for (int i = 0; i < 10; i++) {
                 snprintf(log_buf, sizeof(log_buf), "  %s: %.3f (адрес: %p)", names[i], old[i], (void*)((uintptr_t)addr + i * 0x20));
                 log_to_file(log_buf);
             }
             
-            // Применяем патч
+            // Патч
             hb->head = news[0];
             hb->torso_1 = news[1];
             hb->torso_2 = news[2];
@@ -144,7 +153,6 @@ __attribute__((constructor)) static void patch(void) {
             hb->stomach = news[8];
             hb->pelvis = news[9];
             
-            // Логируем изменения с адресами
             log_to_file("Изменения:");
             for (int i = 0; i < 10; i++) {
                 snprintf(log_buf, sizeof(log_buf), "  %s: %.3f → %.3f (адрес: %p)", names[i], old[i], news[i], (void*)((uintptr_t)addr + i * 0x20));
@@ -153,7 +161,6 @@ __attribute__((constructor)) static void patch(void) {
             
             log_to_file("✅ Патч в памяти успешно применён!");
             
-            // Подробное сообщение для уведомления
             char alert_msg[2048];
             snprintf(alert_msg, sizeof(alert_msg),
                      "✅ Хитбоксы заменены!\n\n"
@@ -168,7 +175,7 @@ __attribute__((constructor)) static void patch(void) {
                      "CHEST: %.3f → %.3f\n"
                      "STOMACH: %.3f → %.3f\n"
                      "PELVIS: %.3f → %.3f\n\n"
-                     "Подробности в логе: saves/hitbox_patch.log",
+                     "Лог: /var/mobile/hitbox_patch.log",
                      addr,
                      old[0], news[0],
                      old[1], news[1],
@@ -184,12 +191,28 @@ __attribute__((constructor)) static void patch(void) {
             show_alert("🎯 Успех!", alert_msg);
             return;
         }
-        // Если не нашли, ждём 0.5 сек и пробуем снова (макс 5 сек)
-        usleep(500000);
+        usleep(500000); // 0.5 сек
     }
     
     log_to_file("❌ Не удалось найти хитбоксы в памяти");
-    show_alert("❌ Ошибка", "Не удалось найти хитбоксы в памяти.\nПроверьте лог.");
+    show_alert("❌ Ошибка", "Не удалось найти хитбоксы в памяти.\nПроверьте лог /var/mobile/hitbox_patch.log");
 }
 
-int main(void) { return 0; }
+// Для загрузки как dylib
+__attribute__((constructor)) static void init() {
+    // Запускаем с небольшой задержкой, чтобы игра успела загрузиться
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            patch();
+        }
+    });
+}
+
+// Для запуска как обычной программы
+int main() {
+    @autoreleasepool {
+        // Если запущено как программа, ждать не нужно
+        patch();
+    }
+    return 0;
+}
