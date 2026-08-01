@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Flexible pattern search with float tolerance
+// Fixed compilation errors
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -21,14 +21,13 @@ typedef struct {
     float patchedFloat;
 } HitboxValue;
 
-// Значения из дампа (актуальные для этой версии)
 static HitboxValue gHitboxes[] = {
     {"HEAD",        0x3E19999A, 0.15f, 0x3E99999A, 0.30f},
     {"TORSO_1",     0x3E4CCCCD, 0.20f, 0x3ECCCCCD, 0.40f},
     {"TORSO_2",     0x3E800000, 0.25f, 0x3F000000, 0.50f},
     {"MID",         0x3E800000, 0.25f, 0x3F000000, 0.50f},
-    {"LEFTARM",     0x3E23D70A, 0.16f, 0x3EA3D70A, 0.32f},  // Из дампа
-    {"RIGHTARM",    0x3E23D70A, 0.16f, 0x3EA3D70A, 0.32f},  // Из дампа
+    {"LEFTARM",     0x3E23D70A, 0.16f, 0x3EA3D70A, 0.32f},
+    {"RIGHTARM",    0x3E23D70A, 0.16f, 0x3EA3D70A, 0.32f},
     {"LEFTLEG_1",   0x3E4CCCCD, 0.20f, 0x3ECCCCCD, 0.40f},
     {"RIGHTLEG_1",  0x3E4CCCCD, 0.20f, 0x3ECCCCCD, 0.40f},
     {"LEFTLEG_2",   0x3E19999A, 0.15f, 0x3E99999A, 0.30f},
@@ -39,7 +38,12 @@ static HitboxValue gHitboxes[] = {
 #define TOLERANCE 0.005f
 
 // ============================================================
-// 2. Memory helpers
+// 2. Forward declarations
+// ============================================================
+static void show_notification(NSString *title, NSString *subtitle);
+
+// ============================================================
+// 3. Memory helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -56,7 +60,7 @@ static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
 }
 
 // ============================================================
-// 3. Logging helper
+// 4. Logging helper
 // ============================================================
 static void write_log(NSString *format, ...) {
     @autoreleasepool {
@@ -96,7 +100,7 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 4. Hex dump
+// 5. Hex dump
 // ============================================================
 static NSString *hexDump(vm_address_t addr, size_t length) {
     NSMutableString *hex = [NSMutableString string];
@@ -115,7 +119,7 @@ static NSString *hexDump(vm_address_t addr, size_t length) {
 }
 
 // ============================================================
-// 5. Find blackrussia-client
+// 6. Find blackrussia-client
 // ============================================================
 typedef struct {
     vm_address_t addr;
@@ -172,6 +176,13 @@ static vm_address_t find_blackrussia_framework(void) {
             gSectionCount = 0;
             uint64_t size = 0;
             
+            // Use getsectiondata instead of deprecated getsectdatafromheader_64
+            unsigned long dataSize = 0;
+            uint8_t *dataPtr = getsectiondata(&_mh_execute_header, "__DATA", "__data", &dataSize);
+            // Actually we need to use the header we have
+            // For compatibility, we still use getsectdatafromheader_64 but suppress warnings
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
             char *ptr = getsectdatafromheader_64(header, "__DATA", "__data", &size);
             if (ptr) add_section((vm_address_t)ptr + slide, size, "__DATA.__data");
             
@@ -183,6 +194,7 @@ static vm_address_t find_blackrussia_framework(void) {
             
             ptr = getsectdatafromheader_64(header, "__DATA", "__bss", &size);
             if (ptr) add_section((vm_address_t)ptr + slide, size, "__DATA.__bss");
+#pragma clang diagnostic pop
             
             write_log(@"");
             write_log(@"📊 Total sections: %d", gSectionCount);
@@ -195,7 +207,7 @@ static vm_address_t find_blackrussia_framework(void) {
 }
 
 // ============================================================
-// 6. Search with float tolerance (compares float values, not bytes)
+// 7. Search with float tolerance
 // ============================================================
 static vm_address_t find_hitboxes(void) {
     write_log(@"");
@@ -204,7 +216,6 @@ static vm_address_t find_hitboxes(void) {
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
-    // Show pattern
     write_log(@"🔍 Looking for pattern (10 values, step 0x%X):", STEP_SIZE);
     for (int i = 0; i < HITBOX_COUNT; i++) {
         write_log(@"  +0x%03X: %s = %.3f", i * STEP_SIZE, gHitboxes[i].name, gHitboxes[i].originalFloat);
@@ -218,7 +229,6 @@ static vm_address_t find_hitboxes(void) {
         vm_size_t size = gSections[si].size;
         const char *sectName = gSections[si].name;
         
-        // Skip tiny sections
         if (size < HITBOX_COUNT * STEP_SIZE) continue;
         
         write_log(@"");
@@ -235,12 +245,10 @@ static vm_address_t find_hitboxes(void) {
                 write_log(@"  📊 Scanned %d positions in %s", checked, sectName);
             }
             
-            // Check HEAD (must be exact)
             uint32_t headVal = 0;
             if (!read_memory(addr, &headVal, 4)) continue;
             if (headVal != gHitboxes[0].original) continue;
             
-            // Now verify all values with tolerance
             BOOL allMatch = YES;
             int matched = 0;
             
@@ -298,7 +306,7 @@ static vm_address_t find_hitboxes(void) {
 }
 
 // ============================================================
-// 7. Main patching
+// 8. Main patching
 // ============================================================
 static void patch_hitboxes(void) {
     write_log(@"");
@@ -312,7 +320,6 @@ static void patch_hitboxes(void) {
     write_log(@"🔑 Task port: %d", gTask);
     write_log(@"");
     
-    // Show target values
     write_log(@"📋 Target values (x2):");
     for (int i = 0; i < HITBOX_COUNT; i++) {
         write_log(@"  %s: %.3f → %.3f", 
@@ -322,7 +329,6 @@ static void patch_hitboxes(void) {
     }
     write_log(@"");
     
-    // Find framework
     find_blackrussia_framework();
     
     if (gSectionCount == 0) {
@@ -331,7 +337,6 @@ static void patch_hitboxes(void) {
         return;
     }
     
-    // Search
     vm_address_t found = find_hitboxes();
     
     if (!found) {
@@ -396,7 +401,7 @@ static void patch_hitboxes(void) {
 }
 
 // ============================================================
-// 8. Notification
+// 9. Notification display
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -453,7 +458,7 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 9. Entry point
+// 10. Entry point
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
@@ -473,7 +478,7 @@ static void initialize(void) {
 }
 
 // ============================================================
-// 10. Dummy export
+// 11. Dummy export
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
