@@ -92,10 +92,10 @@ static void notify(const char *title, const char *msg) {
 
 static int patch(const char *path) {
     logMsg("INFO", "🚀 Запуск патча");
+    logMsg("INFO", path);
     
     if (access(path, F_OK)) {
         logMsg("ERROR", "Файл не найден");
-        notify("❌ ОШИБКА", "Файл не найден");
         return 1;
     }
     
@@ -207,24 +207,42 @@ static int patch(const char *path) {
 }
 
 static void findAndPatch(void) {
-    const char *paths[] = {
-        "BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
-        "Payload/BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
-        "blackrussia-client.framework/blackrussia-client",
-        "blackrussia-client",
-        NULL
-    };
-    
-    for (int i = 0; paths[i] != NULL; i++) {
-        if (access(paths[i], F_OK) == 0) {
-            logMsg("INFO", "Файл найден");
-            patch(paths[i]);
-            return;
+    @autoreleasepool {
+        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+        logMsg("INFO", [[NSString stringWithFormat:@"Bundle: %@", bundlePath] UTF8String]);
+        
+        NSFileManager *fm = [NSFileManager defaultManager];
+        
+        // Ищем файл рекурсивно
+        NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:bundlePath];
+        NSString *file;
+        while ((file = [enumerator nextObject])) {
+            if ([file hasSuffix:@"blackrussia-client"] && ![file containsString:@".dSYM"]) {
+                NSString *fullPath = [bundlePath stringByAppendingPathComponent:file];
+                logMsg("INFO", [[NSString stringWithFormat:@"✅ Найден файл: %@", fullPath] UTF8String]);
+                patch([fullPath UTF8String]);
+                return;
+            }
         }
+        
+        // Если не нашли - пробуем альтернативные пути
+        const char *paths[] = {
+            "BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
+            "Payload/BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
+            NULL
+        };
+        
+        for (int i = 0; paths[i] != NULL; i++) {
+            if (access(paths[i], F_OK) == 0) {
+                logMsg("INFO", [[NSString stringWithFormat:@"✅ Найден файл: %s", paths[i]] UTF8String]);
+                patch(paths[i]);
+                return;
+            }
+        }
+        
+        logMsg("ERROR", "Файл не найден нигде");
+        notify("❌ ОШИБКА", "Файл не найден\nПроверь лог в Загрузках");
     }
-    
-    logMsg("ERROR", "Файл не найден ни по одному пути");
-    notify("❌ ОШИБКА", "Файл не найден\nПроверь пути в логе");
 }
 
 __attribute__((constructor)) static void init(void) {
