@@ -33,29 +33,28 @@ static const float orig[10] = {0.15f,0.20f,0.25f,0.25f,0.16f,0.16f,0.20f,0.20f,0
 static const float news[10] = {0.225f,0.30f,0.375f,0.375f,0.24f,0.24f,0.30f,0.30f,0.225f,0.225f};
 static const char *names[10] = {"HEAD","TORSO_1","TORSO_2","LEGS_1","LEGS_2","ARMS_1","ARMS_2","CHEST","STOMACH","PELVIS"};
 
+static NSString* get_downloads_path(void) {
+    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *doc = [paths firstObject];
+    NSString *downloads = [doc stringByAppendingPathComponent:@"Downloads"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:downloads]) {
+        [fm createDirectoryAtPath:downloads withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    return downloads;
+}
+
 static void log_to_file(const char *msg) {
-    // Пробуем несколько путей
-    const char *paths[] = {
-        "/var/mobile/hitbox_patch.log",
-        "/tmp/hitbox_patch.log",
-        NULL
-    };
-    FILE *f = NULL;
-    for (int i = 0; paths[i] != NULL; i++) {
-        f = fopen(paths[i], "a");
-        if (f) break;
+    NSString *logPath = [get_downloads_path() stringByAppendingPathComponent:@"hitbox_patch.log"];
+    FILE *f = fopen([logPath UTF8String], "a");
+    if (f) {
+        time_t t = time(NULL);
+        struct tm *tm = localtime(&t);
+        char ts[20];
+        strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+        fprintf(f, "[%s] %s\n", ts, msg);
+        fclose(f);
     }
-    if (!f) {
-        // Если не удалось открыть, просто выводим в консоль
-        printf("[LOG] %s\n", msg);
-        return;
-    }
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    char ts[20];
-    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
-    fprintf(f, "[%s] %s\n", ts, msg);
-    fclose(f);
 }
 
 static void show_alert(const char *title, const char *msg) {
@@ -120,28 +119,34 @@ static void* find_hitbox(const char *libname, long *offset) {
     return NULL;
 }
 
-static void patch(void) {
-    log_to_file("=== ПАТЧ ЗАПУЩЕН ===");
-    
-    // Ждём загрузки библиотек (макс 5 сек)
-    for (int attempts = 0; attempts < 10; attempts++) {
-        long offset = 0;
-        void *addr = find_hitbox("blackrussia-client", &offset);
-        if (!addr) addr = find_hitbox("BrBase", &offset);
-        if (addr) {
+__attribute__((constructor)) static void init() {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            log_to_file("=== Запуск патча хитбоксов ===");
+            show_alert("🔄 Применяем патч", "Поиск хитбоксов в памяти...");
+            
+            long offset = 0;
+            void *addr = find_hitbox("blackrussia-client", &offset);
+            if (!addr) addr = find_hitbox("BrBase", &offset);
+            
+            if (!addr) {
+                log_to_file("❌ Хитбоксы не найдены");
+                show_alert("❌ Ошибка", "Хитбоксы не найдены в памяти");
+                return;
+            }
+            
             HitboxValues *hb = (HitboxValues*)addr;
             float old[10] = {hb->head, hb->torso_1, hb->torso_2, hb->legs_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
             
-            char log_buf[512];
-            snprintf(log_buf, sizeof(log_buf), "Найдено по адресу: %p (смещение: 0x%lX)", addr, offset);
+            char log_buf[256];
+            snprintf(log_buf, sizeof(log_buf), "Найдено по адресу: %p", addr);
             log_to_file(log_buf);
             
             for (int i = 0; i < 10; i++) {
-                snprintf(log_buf, sizeof(log_buf), "  %s: %.3f (адрес: %p)", names[i], old[i], (void*)((uintptr_t)addr + i * 0x20));
+                snprintf(log_buf, sizeof(log_buf), "  %s: %.3f", names[i], old[i]);
                 log_to_file(log_buf);
             }
             
-            // Патч
             hb->head = news[0];
             hb->torso_1 = news[1];
             hb->torso_2 = news[2];
@@ -153,15 +158,9 @@ static void patch(void) {
             hb->stomach = news[8];
             hb->pelvis = news[9];
             
-            log_to_file("Изменения:");
-            for (int i = 0; i < 10; i++) {
-                snprintf(log_buf, sizeof(log_buf), "  %s: %.3f → %.3f (адрес: %p)", names[i], old[i], news[i], (void*)((uintptr_t)addr + i * 0x20));
-                log_to_file(log_buf);
-            }
+            log_to_file("✅ Патч применён!");
             
-            log_to_file("✅ Патч в памяти успешно применён!");
-            
-            char alert_msg[2048];
+            char alert_msg[1024];
             snprintf(alert_msg, sizeof(alert_msg),
                      "✅ Хитбоксы заменены!\n\n"
                      "Адрес: %p\n\n"
@@ -175,7 +174,7 @@ static void patch(void) {
                      "CHEST: %.3f → %.3f\n"
                      "STOMACH: %.3f → %.3f\n"
                      "PELVIS: %.3f → %.3f\n\n"
-                     "Лог: /var/mobile/hitbox_patch.log",
+                     "📁 Лог: На iPhone → Загрузки → hitbox_patch.log",
                      addr,
                      old[0], news[0],
                      old[1], news[1],
@@ -189,30 +188,14 @@ static void patch(void) {
                      old[9], news[9]);
             
             show_alert("🎯 Успех!", alert_msg);
-            return;
-        }
-        usleep(500000); // 0.5 сек
-    }
-    
-    log_to_file("❌ Не удалось найти хитбоксы в памяти");
-    show_alert("❌ Ошибка", "Не удалось найти хитбоксы в памяти.\nПроверьте лог /var/mobile/hitbox_patch.log");
-}
-
-// Для загрузки как dylib
-__attribute__((constructor)) static void init() {
-    // Запускаем с небольшой задержкой, чтобы игра успела загрузиться
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        @autoreleasepool {
-            patch();
         }
     });
 }
 
-// Для запуска как обычной программы
 int main() {
     @autoreleasepool {
-        // Если запущено как программа, ждать не нужно
-        patch();
+        init();
+        while(1) sleep(1);
     }
     return 0;
 }
