@@ -1,4 +1,4 @@
-// norelpatch.mm - v6.0 (ZIP extraction + patch + repack)
+// norelpatch.mm - v7.0 (FIXED compile errors)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -176,17 +176,14 @@ static void unzip_file(NSString *zipPath, NSString *destDir) {
         return;
     }
     
-    // Ищем центральный каталог ZIP
-    const uint8_t *bytes = zipData.bytes;
+    const unsigned char *bytes = (const unsigned char *)zipData.bytes;
     NSUInteger length = zipData.length;
     NSUInteger centralDirOffset = 0;
     
     for (NSUInteger i = length - 22; i > 0; i--) {
         if (i + 4 < length && bytes[i] == 0x50 && bytes[i+1] == 0x4B && bytes[i+2] == 0x05 && bytes[i+3] == 0x06) {
-            // Нашли конец центрального каталога
             centralDirOffset = i - 16;
             if (centralDirOffset + 4 < length) {
-                // Читаем смещение центрального каталога
                 uint32_t dirOffset = 0;
                 memcpy(&dirOffset, bytes + centralDirOffset + 12, 4);
                 centralDirOffset = dirOffset;
@@ -200,7 +197,6 @@ static void unzip_file(NSString *zipPath, NSString *destDir) {
         return;
     }
     
-    // Парсим центральный каталог
     NSUInteger pos = centralDirOffset;
     int fileCount = 0;
     
@@ -225,58 +221,50 @@ static void unzip_file(NSString *zipPath, NSString *destDir) {
         
         if (fileNameLength > 0) {
             NSString *fileName = [[NSString alloc] initWithBytes:bytes + pos + 46 length:fileNameLength encoding:NSUTF8StringEncoding];
-            if (fileName) {
-                // Проверяем .ani файлы
-                if ([fileName hasSuffix:@".ani"]) {
-                    write_log(@"📁 Found: %@ (%lu bytes)", fileName, (unsigned long)uncompressedSize);
+            if (fileName && [fileName hasSuffix:@".ani"]) {
+                write_log(@"📁 Found: %@ (%lu bytes)", fileName, (unsigned long)uncompressedSize);
+                
+                NSUInteger localPos = localHeaderOffset;
+                if (localPos + 30 < length && bytes[localPos] == 0x50 && bytes[localPos+1] == 0x4B && bytes[localPos+2] == 0x03 && bytes[localPos+3] == 0x04) {
                     
-                    // Читаем локальный заголовок
-                    NSUInteger localPos = localHeaderOffset;
-                    if (localPos + 30 < length && bytes[localPos] == 0x50 && bytes[localPos+1] == 0x4B && bytes[localPos+2] == 0x03 && bytes[localPos+3] == 0x04) {
+                    uint16_t localFileNameLength = 0;
+                    memcpy(&localFileNameLength, bytes + localPos + 26, 2);
+                    uint16_t localExtraLength = 0;
+                    memcpy(&localExtraLength, bytes + localPos + 28, 2);
+                    
+                    NSUInteger dataStart = localPos + 30 + localFileNameLength + localExtraLength;
+                    
+                    if (dataStart + compressedSize <= length) {
+                        NSData *fileData = [NSData dataWithBytes:bytes + dataStart length:compressedSize];
+                        NSData *uncompressedData = fileData;
                         
-                        uint16_t localFileNameLength = 0;
-                        memcpy(&localFileNameLength, bytes + localPos + 26, 2);
-                        uint16_t localExtraLength = 0;
-                        memcpy(&localExtraLength, bytes + localPos + 28, 2);
-                        
-                        NSUInteger dataStart = localPos + 30 + localFileNameLength + localExtraLength;
-                        
-                        if (dataStart + compressedSize <= length) {
-                            NSData *fileData = [NSData dataWithBytes:bytes + dataStart length:compressedSize];
+                        if (compressedSize != uncompressedSize && uncompressedSize > 0) {
+                            z_stream stream = {0};
+                            inflateInit(&stream);
                             
-                            // Если сжато - распаковываем
-                            NSData *uncompressedData = fileData;
-                            if (compressedSize != uncompressedSize) {
-                                // Простая распаковка zlib
-                                z_stream stream = {0};
-                                inflateInit(&stream);
-                                
-                                stream.next_in = (Bytef*)fileData.bytes;
-                                stream.avail_in = (uInt)fileData.length;
-                                
-                                NSMutableData *outData = [NSMutableData dataWithLength:uncompressedSize];
-                                stream.next_out = outData.mutableBytes;
-                                stream.avail_out = (uInt)uncompressedSize;
-                                
-                                inflate(&stream, Z_FINISH);
-                                inflateEnd(&stream);
-                                
-                                if (stream.total_out == uncompressedSize) {
-                                    uncompressedData = outData;
-                                } else {
-                                    write_log(@"   ⚠️ Decompress mismatch: %lu vs %lu", stream.total_out, (unsigned long)uncompressedSize);
-                                }
-                            }
+                            stream.next_in = (Bytef*)fileData.bytes;
+                            stream.avail_in = (uInt)fileData.length;
                             
-                            // Патчим
-                            NSData *patched = patch_reload_strings(uncompressedData, fileName);
-                            if (patched) {
-                                // Сохраняем патченый файл во временную папку
-                                NSString *outPath = [destDir stringByAppendingPathComponent:fileName];
-                                [patched writeToFile:outPath atomically:YES];
-                                write_log(@"   ✅ Saved patched: %@", fileName);
-                                isPatched = YES;
+                            NSMutableData *outData = [NSMutableData dataWithLength:uncompressedSize];
+                            stream.next_out = (Bytef*)outData.mutableBytes;
+                            stream.avail_out = (uInt)uncompressedSize;
+                            
+                            int ret = inflate(&stream, Z_FINISH);
+                            inflateEnd(&stream);
+                            
+                            if (ret == Z_STREAM_END && stream.total_out == uncompressedSize) {
+                                uncompressedData = outData;
+                            } else {
+                                write_log(@"   ⚠️ Decompress error: %d", ret);
                             }
+                        }
+                        
+                        NSData *patched = patch_reload_strings(uncompressedData, fileName);
+                        if (patched) {
+                            NSString *outPath = [destDir stringByAppendingPathComponent:fileName];
+                            [patched writeToFile:outPath atomically:YES];
+                            write_log(@"   ✅ Saved: %@", fileName);
+                            isPatched = YES;
                         }
                     }
                 }
@@ -287,7 +275,7 @@ static void unzip_file(NSString *zipPath, NSString *destDir) {
         pos += 46 + fileNameLength + extraFieldLength + commentLength;
     }
     
-    write_log(@"📊 Total files in ZIP: %d", fileCount);
+    write_log(@"📊 Total entries: %d", fileCount);
 }
 
 static void zip_folder(NSString *srcDir, NSString *destPath) {
@@ -297,9 +285,7 @@ static void zip_folder(NSString *srcDir, NSString *destPath) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *files = [fm subpathsOfDirectoryAtPath:srcDir error:nil];
     
-    // Создаем новый ZIP
     NSMutableData *zipData = [NSMutableData data];
-    
     NSMutableArray *centralDirEntries = [NSMutableArray array];
     uint32_t centralDirStart = 0;
     
@@ -314,14 +300,10 @@ static void zip_folder(NSString *srcDir, NSString *destPath) {
         
         NSData *fileNameData = [file dataUsingEncoding:NSUTF8StringEncoding];
         
-        // Локальный заголовок
-        uint32_t crc = 0;
-        crc32(crc, fileData.bytes, (uInt)fileData.length);
-        
+        uint32_t crc = crc32(0, (const Bytef*)fileData.bytes, (uInt)fileData.length);
         uint32_t compressedSize = (uint32_t)fileData.length;
         uint32_t uncompressedSize = (uint32_t)fileData.length;
         
-        // Просто храним без сжатия (быстрее)
         NSMutableData *localHeader = [NSMutableData data];
         uint32_t sig = 0x04034b50; [localHeader appendBytes:&sig length:4];
         uint16_t version = 0x0A; [localHeader appendBytes:&version length:2];
@@ -340,7 +322,6 @@ static void zip_folder(NSString *srcDir, NSString *destPath) {
         [zipData appendData:localHeader];
         [zipData appendData:fileData];
         
-        // Запись центрального каталога
         NSMutableData *centralEntry = [NSMutableData data];
         uint32_t centralSig = 0x02014b50; [centralEntry appendBytes:&centralSig length:4];
         uint16_t verMade = 0x0A; [centralEntry appendBytes:&verMade length:2];
@@ -370,7 +351,6 @@ static void zip_folder(NSString *srcDir, NSString *destPath) {
         [zipData appendData:entry];
     }
     
-    // Конец центрального каталога
     NSMutableData *endOfCentral = [NSMutableData data];
     uint32_t endSig = 0x06054b50; [endOfCentral appendBytes:&endSig length:4];
     uint16_t diskNum2 = 0; [endOfCentral appendBytes:&diskNum2 length:2];
@@ -410,7 +390,6 @@ static void find_and_patch_zip(void) {
             write_log(@"");
             write_log(@"📦 Found ZIP: %@", fullPath);
             
-            // Бэкап
             NSString *backupPath = [fullPath stringByAppendingString:@".original"];
             if (![fm fileExistsAtPath:backupPath]) {
                 NSData *origData = [NSData dataWithContentsOfFile:fullPath];
@@ -418,15 +397,12 @@ static void find_and_patch_zip(void) {
                 write_log(@"💾 Backup: %@", backupPath.lastPathComponent);
             }
             
-            // Временная папка для распаковки
             NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"br_anim_patch"];
             [fm removeItemAtPath:tempDir error:nil];
             
-            // Распаковываем
             unzip_file(fullPath, tempDir);
             
             if (isPatched) {
-                // Запаковываем обратно
                 zip_folder(tempDir, fullPath);
                 write_log(@"✅ ZIP patched!");
             }
@@ -442,16 +418,14 @@ static void find_and_patch_zip(void) {
 static void patch_all(void) {
     @autoreleasepool {
         if (isPatched) {
-            write_log(@"ℹ️ Already patched, skipping...");
+            write_log(@"ℹ️ Already patched");
             return;
         }
         
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-        write_log(@"║  🔥 NO RELOAD PATCHER v6.0 (10/10)                         ║");
-        write_log(@"║  ✅ Extracts br_anim.bpc (ZIP)                              ║");
-        write_log(@"║  ✅ Patches .ani files inside                               ║");
-        write_log(@"║  ✅ Repacks ZIP                                             ║");
+        write_log(@"║  🔥 NO RELOAD PATCHER v7.0                                 ║");
+        write_log(@"║  ✅ Extracts ZIP, patches .ani, repacks                     ║");
         write_log(@"╚═══════════════════════════════════════════════════════════════╝");
         write_log(@"");
         
