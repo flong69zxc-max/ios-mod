@@ -1,4 +1,4 @@
-// norelpatch.mm - Remove reload animations (ULTIMATE v2)
+// norelpatch.mm - Remove reload animations (ULTIMATE v2 - FIXED)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -46,13 +46,12 @@ static void write_log(NSString *format, ...) {
 }
 
 static void hex_dump(NSData *data, NSRange range) {
-    // Ограничиваем вывод чтобы не зависнуть
     if (range.length > 512) {
         write_log(@"      [Showing first 512 bytes of %lu]", (unsigned long)range.length);
         range.length = 512;
     }
     
-    const uint8_t *bytes = data.bytes;
+    const unsigned char *bytes = (const unsigned char *)data.bytes;
     NSMutableString *hex = [NSMutableString string];
     for (NSUInteger i = range.location; i < range.location + range.length && i < data.length; i++) {
         [hex appendFormat:@"%02X ", bytes[i]];
@@ -92,7 +91,6 @@ static void patch_anim_file(NSString *filePath) {
     
     write_log(@"📊 FILE SIZE: %lu bytes", (unsigned long)data.length);
     
-    // Бэкап оригинала
     NSString *backupPath = [filePath stringByAppendingString:@".original"];
     if (![fm fileExistsAtPath:backupPath]) {
         BOOL backupSaved = [data writeToFile:backupPath atomically:YES];
@@ -105,13 +103,12 @@ static void patch_anim_file(NSString *filePath) {
         write_log(@"ℹ️ Backup already exists: %@", backupPath.lastPathComponent);
     }
     
-    // Поиск всех reload строк с расширенным списком
     NSArray *searchStrings = @[
         @"python_reload",
         @"python_crouchreload",
-        @"shotgun_reload", 
+        @"shotgun_reload",
         @"shotgun_crouchreload",
-        @"reload" // Базовое слово для дополнительного поиска
+        @"reload"
     ];
     
     NSMutableData *newData = [data mutableCopy];
@@ -133,7 +130,6 @@ static void patch_anim_file(NSString *filePath) {
             write_log(@"🔍 Found '%@' #%d at offset 0x%08lX", search, found, (unsigned long)range.location);
             write_log(@"   Length: %lu bytes", (unsigned long)range.length);
             
-            // Показываем контекст (16 байт до и после)
             NSUInteger start = range.location > 16 ? range.location - 16 : 0;
             NSUInteger end = range.location + range.length + 16;
             if (end > data.length) end = data.length;
@@ -142,7 +138,6 @@ static void patch_anim_file(NSString *filePath) {
             write_log(@"   Context (hex):");
             hex_dump(data, contextRange);
             
-            // ASCII контекст
             NSData *contextData = [data subdataWithRange:contextRange];
             NSString *contextStr = [[NSString alloc] initWithData:contextData encoding:NSUTF8StringEncoding];
             if (contextStr) {
@@ -158,16 +153,14 @@ static void patch_anim_file(NSString *filePath) {
                 write_log(@"   Context (ASCII): %@", ascii);
             }
             
-            // Заменяем на нули
             uint8_t zeros[128] = {0};
             NSData *replaceData = [NSData dataWithBytes:zeros length:range.length];
             [newData replaceBytesInRange:range withBytes:replaceData.bytes length:replaceData.length];
             
             write_log(@"   ✅ Replaced with zeros (%lu bytes)", (unsigned long)range.length);
             
-            // Верификация
             NSData *verifyData = [newData subdataWithRange:range];
-            const uint8_t *verifyBytes = verifyData.bytes;
+            const unsigned char *verifyBytes = (const unsigned char *)verifyData.bytes;
             BOOL allZero = YES;
             for (NSUInteger i = 0; i < verifyData.length; i++) {
                 if (verifyBytes[i] != 0) { allZero = NO; break; }
@@ -214,7 +207,6 @@ static void patch_anim_file(NSString *filePath) {
             NSNumber *newSize = attrs[NSFileSize];
             write_log(@"   New file size: %@ bytes", newSize);
             
-            // Финальная проверка
             NSData *verifyFile = [NSData dataWithContentsOfFile:filePath];
             if (verifyFile) {
                 BOOL stillExists = NO;
