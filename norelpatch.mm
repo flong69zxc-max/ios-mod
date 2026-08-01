@@ -1,4 +1,4 @@
-// norelpatch.mm - Remove reload animations (ULTIMATE v2 - FIXED)
+// norelpatch.mm - Remove reload animations (FIXED PATH)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -91,6 +91,7 @@ static void patch_anim_file(NSString *filePath) {
     
     write_log(@"📊 FILE SIZE: %lu bytes", (unsigned long)data.length);
     
+    // Бэкап
     NSString *backupPath = [filePath stringByAppendingString:@".original"];
     if (![fm fileExistsAtPath:backupPath]) {
         BOOL backupSaved = [data writeToFile:backupPath atomically:YES];
@@ -107,8 +108,7 @@ static void patch_anim_file(NSString *filePath) {
         @"python_reload",
         @"python_crouchreload",
         @"shotgun_reload",
-        @"shotgun_crouchreload",
-        @"reload"
+        @"shotgun_crouchreload"
     ];
     
     NSMutableData *newData = [data mutableCopy];
@@ -130,6 +130,7 @@ static void patch_anim_file(NSString *filePath) {
             write_log(@"🔍 Found '%@' #%d at offset 0x%08lX", search, found, (unsigned long)range.location);
             write_log(@"   Length: %lu bytes", (unsigned long)range.length);
             
+            // Контекст
             NSUInteger start = range.location > 16 ? range.location - 16 : 0;
             NSUInteger end = range.location + range.length + 16;
             if (end > data.length) end = data.length;
@@ -153,12 +154,14 @@ static void patch_anim_file(NSString *filePath) {
                 write_log(@"   Context (ASCII): %@", ascii);
             }
             
+            // Заменяем на нули
             uint8_t zeros[128] = {0};
             NSData *replaceData = [NSData dataWithBytes:zeros length:range.length];
             [newData replaceBytesInRange:range withBytes:replaceData.bytes length:replaceData.length];
             
             write_log(@"   ✅ Replaced with zeros (%lu bytes)", (unsigned long)range.length);
             
+            // Верификация
             NSData *verifyData = [newData subdataWithRange:range];
             const unsigned char *verifyBytes = (const unsigned char *)verifyData.bytes;
             BOOL allZero = YES;
@@ -192,7 +195,6 @@ static void patch_anim_file(NSString *filePath) {
         }
     } else {
         write_log(@"   ⚠️ NOTHING WAS REPLACED!");
-        write_log(@"   Check if file contains reload strings");
     }
     
     if (totalPatched > 0) {
@@ -207,6 +209,7 @@ static void patch_anim_file(NSString *filePath) {
             NSNumber *newSize = attrs[NSFileSize];
             write_log(@"   New file size: %@ bytes", newSize);
             
+            // Финальная проверка
             NSData *verifyFile = [NSData dataWithContentsOfFile:filePath];
             if (verifyFile) {
                 BOOL stillExists = NO;
@@ -270,25 +273,24 @@ static void patch_all(void) {
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════════╗");
         write_log(@"║  🔥 NO RELOAD PATCHER v2.0                                 ║");
-        write_log(@"║  ✅ Backup created before patching                          ║");
-        write_log(@"║  ✅ Double verification                                     ║");
         write_log(@"╚═══════════════════════════════════════════════════════════════╝");
         write_log(@"");
         
+        // Правильный путь: Library/Application Support/files/mesh/br_anim.bpc - ЭТО ФАЙЛ
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
         NSString *libPath = [paths firstObject];
-        NSString *bpc = [[[[libPath stringByAppendingPathComponent:@"Application Support"]
-                           stringByAppendingPathComponent:@"files"]
-                          stringByAppendingPathComponent:@"mesh"]
-                         stringByAppendingPathComponent:@"br_anim.bpc"];
+        NSString *bpcFile = [[[[libPath stringByAppendingPathComponent:@"Application Support"]
+                               stringByAppendingPathComponent:@"files"]
+                              stringByAppendingPathComponent:@"mesh"]
+                             stringByAppendingPathComponent:@"br_anim.bpc"];
         
-        write_log(@"📂 Target path: %@", bpc);
+        write_log(@"📂 Target file: %@", bpcFile);
         
         NSFileManager *fm = [NSFileManager defaultManager];
-        if (![fm fileExistsAtPath:bpc]) {
-            write_log(@"❌ br_anim.bpc directory NOT FOUND!");
-            write_log(@"   Full path: %@", bpc);
+        if (![fm fileExistsAtPath:bpcFile]) {
+            write_log(@"❌ br_anim.bpc FILE NOT FOUND!");
             
+            // Проверяем пути
             NSString *appSupport = [libPath stringByAppendingPathComponent:@"Application Support"];
             list_directory(appSupport);
             
@@ -300,21 +302,15 @@ static void patch_all(void) {
             
             write_log(@"");
             write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-            write_log(@"║  ❌ PATH NOT FOUND!                                         ║");
+            write_log(@"║  ❌ FILE NOT FOUND!                                         ║");
             write_log(@"╚═══════════════════════════════════════════════════════════════╝");
             return;
         }
         
-        list_directory(bpc);
+        write_log(@"✅ br_anim.bpc FILE EXISTS");
         
-        NSArray *filesToPatch = @[
-            [bpc stringByAppendingPathComponent:@"python.ani"],
-            [bpc stringByAppendingPathComponent:@"shotgun.ani"]
-        ];
-        
-        for (NSString *filePath in filesToPatch) {
-            patch_anim_file(filePath);
-        }
+        // Патчим сам файл br_anim.bpc (в нём лежат все анимации)
+        patch_anim_file(bpcFile);
         
         isPatched = YES;
         
@@ -322,7 +318,7 @@ static void patch_all(void) {
         write_log(@"╔═══════════════════════════════════════════════════════════════╗");
         write_log(@"║  ✅ NO RELOAD PATCHER FINISHED                              ║");
         write_log(@"║  📝 Log: Documents/saves/NoReload.log                       ║");
-        write_log(@"║  💾 Backups: *.ani.original                                 ║");
+        write_log(@"║  💾 Backup: br_anim.bpc.original                            ║");
         write_log(@"╚═══════════════════════════════════════════════════════════════╝");
         write_log(@"");
     }
@@ -334,15 +330,15 @@ static void patch_with_retry(void) {
     
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
     NSString *libPath = [paths firstObject];
-    NSString *bpc = [[[[libPath stringByAppendingPathComponent:@"Application Support"]
-                       stringByAppendingPathComponent:@"files"]
-                      stringByAppendingPathComponent:@"mesh"]
-                     stringByAppendingPathComponent:@"br_anim.bpc"];
+    NSString *bpcFile = [[[[libPath stringByAppendingPathComponent:@"Application Support"]
+                           stringByAppendingPathComponent:@"files"]
+                          stringByAppendingPathComponent:@"mesh"]
+                         stringByAppendingPathComponent:@"br_anim.bpc"];
     
     NSFileManager *fm = [NSFileManager defaultManager];
     
-    if ([fm fileExistsAtPath:bpc]) {
-        write_log(@"✅ Files found! Applying patch...");
+    if ([fm fileExistsAtPath:bpcFile]) {
+        write_log(@"✅ File found! Applying patch...");
         patch_all();
         return;
     }
