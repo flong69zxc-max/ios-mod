@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed compilation errors
+// Fixed with exact pattern from memory dump
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -11,7 +11,7 @@
 #import <mach-o/getsect.h>
 
 // ============================================================
-// 1. Original hitbox values (little-endian hex)
+// 1. Original hitbox values (from actual memory dump)
 // ============================================================
 typedef struct {
     const char *name;
@@ -22,22 +22,23 @@ typedef struct {
 } HitboxValue;
 
 static HitboxValue gHitboxes[] = {
-    {"HEAD",        0x3E19999A, 0x3E666666, 0.15f, 0.225f},
-    {"TORSO_1",     0x3E4CCCCD, 0x3E99999A, 0.20f, 0.30f},
-    {"TORSO_2",     0x3E800000, 0x3EC00000, 0.25f, 0.375f},
-    {"MID",         0x3E800000, 0x3EC00000, 0.25f, 0.375f},
-    {"LEFTARM",     0x3E24E148, 0x3E74E148, 0.16f, 0.24f},
-    {"RIGHTARM",    0x3E24E148, 0x3E74E148, 0.16f, 0.24f},
-    {"LEFTLEG_1",   0x3E4CCCCD, 0x3E99999A, 0.20f, 0.30f},
-    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3E99999A, 0.20f, 0.30f},
-    {"LEFTLEG_2",   0x3E19999A, 0x3E666666, 0.15f, 0.225f},
-    {"RIGHTLEG_2",  0x3E19999A, 0x3E666666, 0.15f, 0.225f}
+    {"HEAD",        0x3E19999A, 0x3E99999A, 0.15f, 0.30f},      // x2
+    {"TORSO_1",     0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},      // x2
+    {"TORSO_2",     0x3E800000, 0x3F000000, 0.25f, 0.50f},      // x2
+    {"MID",         0x3E800000, 0x3F000000, 0.25f, 0.50f},      // x2
+    {"LEFTARM",     0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},      // x2 (actual value from dump)
+    {"RIGHTARM",    0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},      // x2
+    {"LEFTLEG_1",   0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},      // x2
+    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},      // x2
+    {"LEFTLEG_2",   0x3E19999A, 0x3E99999A, 0.15f, 0.30f},      // x2
+    {"RIGHTLEG_2",  0x3E19999A, 0x3E99999A, 0.15f, 0.30f}       // x2
 };
 #define HITBOX_COUNT (sizeof(gHitboxes)/sizeof(gHitboxes[0]))
 #define STEP_SIZE 0x20
+#define TOLERANCE 0.001f
 
 // ============================================================
-// 2. Memory helpers (declared before use)
+// 2. Memory helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -159,7 +160,6 @@ static MemoryRegion find_blackrussia_client(void) {
             write_log(@"  └─────────────────────────────────────────────");
             write_log(@"");
             
-            // Get __DATA segment
             uint64_t dataSize = 0;
             char *dataPtr = getsectdatafromheader_64(header, "__DATA", "__data", &dataSize);
             
@@ -178,20 +178,6 @@ static MemoryRegion find_blackrussia_client(void) {
                 write_log(@"  └─────────────────────────────────────────────");
                 write_log(@"");
                 
-                // Dump first 64 bytes of data section
-                write_log(@"📄 First 64 bytes of __DATA.__data:");
-                write_log(@"  %@", hexDump(dataAddr, 64));
-                write_log(@"");
-                
-                return result;
-            } else {
-                write_log(@"⚠️ Could not find __DATA.__data section");
-                write_log(@"  Trying to scan the whole image...");
-                
-                result.addr = (vm_address_t)header + slide;
-                result.size = 0x2000000; // 32MB
-                result.path = name;
-                result.slide = slide;
                 return result;
             }
         }
@@ -202,146 +188,103 @@ static MemoryRegion find_blackrussia_client(void) {
 }
 
 // ============================================================
-// 7. Exact pattern search with detailed logging
+// 7. Search with tolerance
 // ============================================================
-static vm_address_t find_exact_pattern(vm_address_t start, vm_size_t size) {
-    if (start == 0 || size == 0) {
-        write_log(@"❌ Invalid search range");
-        return 0;
-    }
-    
+static vm_address_t find_with_tolerance(vm_address_t start, vm_size_t size) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║           SCANNING FOR EXACT HITBOX PATTERN              ║");
+    write_log(@"║      SCANNING WITH FLOAT TOLERANCE (%.3f)               ║", TOLERANCE);
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
-    write_log(@"📍 Search range:");
-    write_log(@"  Start: 0x%llX", (unsigned long long)start);
-    write_log(@"  End:   0x%llX", (unsigned long long)(start + size));
-    write_log(@"  Size:  0x%llX (%llu bytes)", (unsigned long long)size, (unsigned long long)size);
-    write_log(@"");
-    write_log(@"🔍 Looking for pattern:");
-    write_log(@"  HEAD:     9A 99 19 3E (%.3f)", gHitboxes[0].originalFloat);
-    write_log(@"  Padding:  28 bytes of zeros");
-    write_log(@"  TORSO_1:  CD CC 4C 3E (%.3f)", gHitboxes[1].originalFloat);
-    write_log(@"  Step:     0x%X between each value", STEP_SIZE);
+    write_log(@"📍 Search range: 0x%llX - 0x%llX", (unsigned long long)start, (unsigned long long)(start + size));
     write_log(@"");
     
     int checked = 0;
-    int foundCandidates = 0;
-    int readErrors = 0;
+    int candidates = 0;
     
-    for (vm_address_t addr = start; addr < start + size - 32; addr += 4) {
+    for (vm_address_t addr = start; addr < start + size - 4; addr += 4) {
         checked++;
-        
         if (checked % 100000 == 0) {
-            write_log(@"  📊 Scanned %d positions (%.1f%%)", 
-                     checked, (float)checked / (size / 4) * 100);
+            write_log(@"  Scanned %d positions", checked);
         }
         
-        // Read HEAD
+        // Check HEAD (exact match required)
         uint32_t headVal = 0;
-        if (!read_memory(addr, &headVal, 4)) {
-            readErrors++;
-            continue;
-        }
-        
-        // Check HEAD
+        if (!read_memory(addr, &headVal, 4)) continue;
         if (headVal != gHitboxes[0].original) continue;
         
-        // Read TORSO_1 at +0x20
+        // Check TORSO_1 at +0x20 (exact match required)
         uint32_t torsoVal = 0;
-        vm_address_t torsoAddr = addr + STEP_SIZE;
-        if (!read_memory(torsoAddr, &torsoVal, 4)) {
-            readErrors++;
-            continue;
-        }
-        
-        // Check TORSO_1
+        if (!read_memory(addr + STEP_SIZE, &torsoVal, 4)) continue;
         if (torsoVal != gHitboxes[1].original) continue;
         
-        // Found candidate
-        foundCandidates++;
+        candidates++;
         write_log(@"");
-        write_log(@"🎯 Found candidate #%d at 0x%llX", foundCandidates, (unsigned long long)addr);
-        write_log(@"  HEAD:     9A 99 19 3E at 0x%llX", (unsigned long long)addr);
-        write_log(@"  TORSO_1:  CD CC 4C 3E at 0x%llX", (unsigned long long)torsoAddr);
-        write_log(@"");
+        write_log(@"🔍 Candidate #%d at 0x%llX", candidates, (unsigned long long)addr);
+        write_log(@"  HEAD:     0x%08X (%.3f) ✓", headVal, *(float*)&headVal);
+        write_log(@"  TORSO_1:  0x%08X (%.3f) ✓", torsoVal, *(float*)&torsoVal);
         
-        // Verify all 10 values
-        write_log(@"  Verifying all 10 hitboxes:");
+        // Check remaining values with tolerance
         BOOL allMatch = YES;
+        int matched = 2;
         
-        for (int i = 0; i < HITBOX_COUNT; i++) {
+        for (int i = 2; i < HITBOX_COUNT; i++) {
             vm_address_t checkAddr = addr + i * STEP_SIZE;
-            uint32_t checkBuf = 0;
-            
-            if (!read_memory(checkAddr, &checkBuf, 4)) {
-                write_log(@"    ❌ %s: CAN'T READ at 0x%llX", gHitboxes[i].name, (unsigned long long)checkAddr);
+            uint32_t val = 0;
+            if (!read_memory(checkAddr, &val, 4)) {
                 allMatch = NO;
                 break;
             }
             
-            float checkFloat = *(float*)&checkBuf;
+            float actual = *(float*)&val;
+            float expected = gHitboxes[i].originalFloat;
+            float diff = fabs(actual - expected);
             
-            if (checkBuf == gHitboxes[i].original) {
-                write_log(@"    ✅ %s: 0x%08X (%.4f) at 0x%llX ✓", 
-                         gHitboxes[i].name, checkBuf, checkFloat, (unsigned long long)checkAddr);
+            if (diff <= TOLERANCE) {
+                matched++;
+                write_log(@"  %s:     0x%08X (%.3f) ✓ (diff: %.6f)", 
+                         gHitboxes[i].name, val, actual, diff);
             } else {
-                write_log(@"    ❌ %s: expected 0x%08X (%.4f), got 0x%08X (%.4f) at 0x%llX", 
-                         gHitboxes[i].name, 
-                         gHitboxes[i].original, gHitboxes[i].originalFloat,
-                         checkBuf, checkFloat,
-                         (unsigned long long)checkAddr);
+                write_log(@"  %s:     0x%08X (%.3f) ✗ (expected: %.3f, diff: %.6f)", 
+                         gHitboxes[i].name, val, actual, expected, diff);
                 allMatch = NO;
+                // Don't break, log all mismatches
             }
         }
         
-        if (allMatch) {
+        if (allMatch && matched == HITBOX_COUNT) {
             write_log(@"");
             write_log(@"╔═══════════════════════════════════════════════════════════╗");
-            write_log(@"║     ✅ ALL 10 HITBOXES VERIFIED SUCCESSFULLY!            ║");
+            write_log(@"║     ✅ ALL %d HITBOXES MATCHED (with tolerance)!         ║", HITBOX_COUNT);
             write_log(@"╚═══════════════════════════════════════════════════════════╝");
             write_log(@"");
             write_log(@"📍 Found at: 0x%llX", (unsigned long long)addr);
-            write_log(@"📊 Total candidates found: %d", foundCandidates);
-            write_log(@"📊 Total positions scanned: %d", checked);
-            write_log(@"");
             
-            // Dump the found area
-            write_log(@"📄 Memory dump around found address:");
-            for (int i = -2; i <= 12; i++) {
-                vm_address_t dumpAddr = addr + i * STEP_SIZE;
-                write_log(@"  0x%llX: %@", (unsigned long long)dumpAddr, hexDump(dumpAddr, 16));
-            }
+            // Dump memory around found address
             write_log(@"");
+            write_log(@"📄 Memory dump (32 bytes around each value):");
+            for (int i = 0; i < HITBOX_COUNT; i++) {
+                vm_address_t dumpAddr = addr + i * STEP_SIZE;
+                write_log(@"  +0x%03X (%s): %@", i * STEP_SIZE, gHitboxes[i].name, hexDump(dumpAddr, 32));
+            }
             
             return addr;
         }
     }
     
     write_log(@"");
-    write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║              ❌ SCAN COMPLETE - NOT FOUND                ║");
-    write_log(@"╚═══════════════════════════════════════════════════════════╝");
-    write_log(@"");
-    write_log(@"📊 Statistics:");
-    write_log(@"  Total positions scanned: %d", checked);
-    write_log(@"  Total HEAD candidates found: %d", foundCandidates);
-    write_log(@"  Read errors: %d", readErrors);
-    write_log(@"");
-    
+    write_log(@"❌ Pattern not found. Scanned %d positions, found %d candidates", checked, candidates);
     return 0;
 }
 
 // ============================================================
-// 8. Main patching logic with detailed logging
+// 8. Main patching logic
 // ============================================================
 static void patch_hitboxes(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v5.0                 ║");
-    write_log(@"║        Exact Pattern Scanner + Ultra Logging             ║");
+    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v6.0                 ║");
+    write_log(@"║        x2 Hitboxes (from actual memory dump)             ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -349,7 +292,16 @@ static void patch_hitboxes(void) {
     write_log(@"🔑 Task port: %d", gTask);
     write_log(@"");
     
-    // Find blackrussia-client
+    // Show what we're patching
+    write_log(@"📋 Target values (x2):");
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        write_log(@"  %s: %.3f → %.3f", 
+                 gHitboxes[i].name, 
+                 gHitboxes[i].originalFloat, 
+                 gHitboxes[i].patchedFloat);
+    }
+    write_log(@"");
+    
     MemoryRegion brClient = find_blackrussia_client();
     
     if (brClient.addr == 0 || brClient.size == 0) {
@@ -359,8 +311,7 @@ static void patch_hitboxes(void) {
         return;
     }
     
-    // Search for pattern
-    vm_address_t found = find_exact_pattern(brClient.addr, brClient.size);
+    vm_address_t found = find_with_tolerance(brClient.addr, brClient.size);
     
     if (!found) {
         write_log(@"");
@@ -369,10 +320,9 @@ static void patch_hitboxes(void) {
         return;
     }
     
-    // Patch all values
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║              APPLYING PATCHES                            ║");
+    write_log(@"║              APPLYING PATCHES (x2)                       ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -387,11 +337,10 @@ static void patch_hitboxes(void) {
         float originalFloat = *(float*)&originalValue;
         float newFloat = *(float*)&newValue;
         
-        write_log(@"📝 Patching %s:", gHitboxes[i].name);
+        write_log(@"📝 %s:", gHitboxes[i].name);
         write_log(@"  Address:  0x%llX", (unsigned long long)patchAddr);
-        write_log(@"  Original: 0x%08X (%.4f)", originalValue, originalFloat);
-        write_log(@"  New:      0x%08X (%.4f)", newValue, newFloat);
-        write_log(@"  Change:   %.4f -> %.4f (x%.2f)", originalFloat, newFloat, newFloat/originalFloat);
+        write_log(@"  Original: 0x%08X (%.3f)", originalValue, originalFloat);
+        write_log(@"  New:      0x%08X (%.3f) x2", newValue, newFloat);
         
         if (!write_memory(patchAddr, &newValue, 4)) {
             success = NO;
@@ -399,13 +348,12 @@ static void patch_hitboxes(void) {
             break;
         }
         
-        // Verify
         uint32_t verifyValue = 0;
         read_memory(patchAddr, &verifyValue, 4);
         if (verifyValue == newValue) {
             write_log(@"  ✅ VERIFIED");
         } else {
-            write_log(@"  ❌ VERIFY FAILED! Expected 0x%08X got 0x%08X", newValue, verifyValue);
+            write_log(@"  ❌ VERIFY FAILED!");
             success = NO;
             break;
         }
@@ -415,13 +363,9 @@ static void patch_hitboxes(void) {
     write_log(@"");
     if (success) {
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
-        write_log(@"║     ✅ ALL 10 HITBOXES PATCHED SUCCESSFULLY!             ║");
+        write_log(@"║     ✅ ALL 10 HITBOXES PATCHED! (x2 damage)             ║");
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
-        write_log(@"");
-        write_log(@"📍 Base address: 0x%llX", (unsigned long long)found);
-        write_log(@"📊 Patched %d values", HITBOX_COUNT);
-        
-        NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX", (unsigned long long)found];
+        NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX\nx2 Hitboxes active!", (unsigned long long)found];
         show_notification(@"Hitboxes patched successfully!", msg);
     } else {
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
@@ -495,9 +439,8 @@ __attribute__((constructor))
 static void initialize(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v5.0 INJECTED          ║");
-    write_log(@"║      Target: blackrussia-client.framework               ║");
-    write_log(@"║      Pattern: HEAD + 28 zeros + TORSO_1                 ║");
+    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v6.0 INJECTED          ║");
+    write_log(@"║      x2 Hitboxes (from memory dump)                     ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     write_log(@"⏳ Waiting 5 seconds for Black Russia to fully load...");
