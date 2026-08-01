@@ -49,10 +49,17 @@ static const char *names[10] = {"HEAD", "TORSO_1", "TORSO_2", "LEGS_1", "LEGS_2"
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *root = nil;
         if (@available(iOS 13.0, *)) {
-            UIWindowScene *scene = (UIWindowScene *)[[[UIApplication sharedApplication] connectedScenes] anyObject];
-            if (scene) root = scene.windows.firstObject.rootViewController;
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in scene.windows) {
+                        if (w.rootViewController) {
+                            root = w.rootViewController;
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        if (!root) root = [UIApplication sharedApplication].keyWindow.rootViewController;
         if (!root) {
             for (UIWindow *w in [UIApplication sharedApplication].windows) {
                 if (w.rootViewController) { root = w.rootViewController; break; }
@@ -63,28 +70,24 @@ static const char *names[10] = {"HEAD", "TORSO_1", "TORSO_2", "LEGS_1", "LEGS_2"
 }
 @end
 
-static NSString* downloadsPath(void) {
+static NSString* savesPath(void) {
     NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *dl = [doc stringByAppendingPathComponent:@"Downloads"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:dl]) {
-        [[NSFileManager defaultManager] createDirectoryAtPath:dl withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *saves = [doc stringByAppendingPathComponent:@"saves"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:saves]) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:saves withIntermediateDirectories:YES attributes:nil error:nil];
     }
-    return [[NSFileManager defaultManager] fileExistsAtPath:dl] ? dl : doc;
+    return [[NSFileManager defaultManager] fileExistsAtPath:saves] ? saves : doc;
 }
 
-static void logMsg(const char *type, const char *msg) {
+static void logMsg(const char *msg) {
     time_t t = time(NULL);
     struct tm *tm = localtime(&t);
     char ts[20];
     strftime(ts, sizeof(ts), "%H:%M:%S", tm);
     
-    if (!strcmp(type, "OK")) printf(GREEN "[%s] ✅ %s\n" RESET, ts, msg);
-    else if (!strcmp(type, "ERROR")) printf(RED "[%s] ❌ %s\n" RESET, ts, msg);
-    else if (!strcmp(type, "INFO")) printf(CYAN "[%s] ℹ️ %s\n" RESET, ts, msg);
-    else if (!strcmp(type, "SUCCESS")) printf(MAGENTA "[%s] 🎯 %s\n" RESET, ts, msg);
-    else if (!strcmp(type, "WARN")) printf(YELLOW "[%s] ⚠️ %s\n" RESET, ts, msg);
+    printf("[%s] %s\n", ts, msg);
     
-    NSString *logPath = [downloadsPath() stringByAppendingPathComponent:@"hitbox_patch.log"];
+    NSString *logPath = [savesPath() stringByAppendingPathComponent:@"hitbox_patch.log"];
     FILE *f = fopen([logPath UTF8String], "a");
     if (f) { fprintf(f, "[%s] %s\n", ts, msg); fclose(f); }
 }
@@ -94,17 +97,17 @@ static void notify(const char *title, const char *msg) {
 }
 
 static int patch(const char *path) {
-    logMsg("INFO", "🚀 Запуск патча");
-    logMsg("INFO", path);
+    logMsg("🚀 Запуск патча");
+    logMsg(path);
     
     if (access(path, F_OK)) {
-        logMsg("ERROR", "Файл не найден");
+        logMsg("❌ Файл не найден");
         return 1;
     }
     
     int fd = open(path, O_RDWR | O_SYNC);
     if (fd < 0) {
-        logMsg("ERROR", "Не удалось открыть файл");
+        logMsg("❌ Не удалось открыть файл");
         notify("❌ ОШИБКА", "Нет прав на чтение");
         return 1;
     }
@@ -114,14 +117,14 @@ static int patch(const char *path) {
     long size = st.st_size;
     
     if (size < 0x130) {
-        logMsg("ERROR", "Файл слишком маленький");
+        logMsg("❌ Файл слишком маленький");
         close(fd);
         return 1;
     }
     
     unsigned char *buf = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (buf == MAP_FAILED) {
-        logMsg("ERROR", "mmap не удался");
+        logMsg("❌ mmap не удался");
         close(fd);
         return 1;
     }
@@ -143,7 +146,7 @@ static int patch(const char *path) {
     }
     
     if (pos < 0) {
-        logMsg("ERROR", "Структура не найдена");
+        logMsg("❌ Структура не найдена");
         notify("❌ ОШИБКА", "Хитбоксы не найдены");
         munmap(buf, size);
         close(fd);
@@ -151,15 +154,15 @@ static int patch(const char *path) {
     }
     
     hb = (HitboxValues*)(buf + pos);
-    float old[10] = {hb->head, hb->torso_1,йд hb->torsoено_2, h поb->legs ад_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
+    float old[10] = {hb->head, hb->torso_1, hb->torso_2, hb->legs_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
     
     char tmp[512];
-    snprintf(tmp, sizeof(tmp), "✅ Наресу: 0x%lX", pos);
-    logMsg("SUCCESS", tmp);
+    snprintf(tmp, sizeof(tmp), "✅ Найдено по адресу: 0x%lX", pos);
+    logMsg(tmp);
     
     for (int i = 0; i < 10; i++) {
-        snprintf(tmp, sizeof(tmp), "  %s: %.3f", names[i], old[i]);
-        logMsg("INFO", tmp);
+        snprintf(tmp, sizeof(tmp), "  %s: %.3f (0x%lX)", names[i], old[i], (long)(pos + i * 0x20));
+        logMsg(tmp);
     }
     
     char gameMsg[1024];
@@ -172,9 +175,9 @@ static int patch(const char *path) {
     if (backup_fd >= 0) {
         write(backup_fd, buf, size);
         close(backup_fd);
-        logMsg("OK", "💾 Бэкап создан");
+        logMsg("💾 Бэкап создан");
     } else {
-        logMsg("WARN", "⚠️ Бэкап не создан");
+        logMsg("⚠️ Бэкап не создан");
     }
     
     hb->head = news[0];
@@ -189,20 +192,21 @@ static int patch(const char *path) {
     hb->pelvis = news[9];
     
     if (msync(buf, size, MS_SYNC) != 0) {
-        logMsg("WARN", "msync не удался");
+        logMsg("⚠️ msync не удался");
     }
     
     munmap(buf, size);
     close(fd);
     
+    logMsg("📊 Изменения:");
     for (int i = 0; i < 10; i++) {
         snprintf(tmp, sizeof(tmp), "  %s: %.3f → %.3f", names[i], old[i], news[i]);
-        logMsg("OK", tmp);
+        logMsg(tmp);
     }
     
-    snprintf(gameMsg, sizeof(gameMsg), "✅ ПАТЧ ПРИМЕНЁН!\n\n📍 Адрес: 0x%lX\n\nНовые значения:\nHEAD: %.3f (было %.3f)\nTORSO_1: %.3f (было %.3f)\nTORSO_2: %.3f (было %.3f)\nLEGS_1: %.3f (было %.3f)\nLEGS_2: %.3f (было %.3f)\nARMS_1: %.3f (было %.3f)\nARMS_2: %.3f (было %.3f)\nCHEST: %.3f (было %.3f)\nSTOMACH: %.3f (было %.3f)\nPELVIS: %.3f (было %.3f)\n\n📁 Лог: Загрузки/hitbox_patch.log\n\n⚠️ ПЕРЕЗАПУСТИ ИГРУ!", pos, news[0], old[0], news[1], old[1], news[2], old[2], news[3], old[3], news[4], old[4], news[5], old[5], news[6], old[6], news[7], old[7], news[8], old[8], news[9], old[9]);
+    snprintf(gameMsg, sizeof(gameMsg), "✅ ПАТЧ ПРИМЕНЁН!\n\n📍 Адрес: 0x%lX\n\nНовые значения:\nHEAD: %.3f (было %.3f)\nTORSO_1: %.3f (было %.3f)\nTORSO_2: %.3f (было %.3f)\nLEGS_1: %.3f (было %.3f)\nLEGS_2: %.3f (было %.3f)\nARMS_1: %.3f (было %.3f)\nARMS_2: %.3f (было %.3f)\nCHEST: %.3f (было %.3f)\nSTOMACH: %.3f (было %.3f)\nPELVIS: %.3f (было %.3f)\n\n📁 Лог: saves/hitbox_patch.log\n\n⚠️ ПЕРЕЗАПУСТИ ИГРУ!", pos, news[0], old[0], news[1], old[1], news[2], old[2], news[3], old[3], news[4], old[4], news[5], old[5], news[6], old[6], news[7], old[7], news[8], old[8], news[9], old[9]);
     
-    logMsg("SUCCESS", "🎉 Патч применён");
+    logMsg("🎉 Патч применён");
     notify("🎉 УСПЕХ!", gameMsg);
     return 0;
 }
@@ -210,7 +214,7 @@ static int patch(const char *path) {
 static void findAndPatch(void) {
     @autoreleasepool {
         NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-        logMsg("INFO", [[NSString stringWithFormat:@"Bundle: %@", bundlePath] UTF8String]);
+        logMsg([[NSString stringWithFormat:@"Bundle: %@", bundlePath] UTF8String]);
         
         NSFileManager *fm = [NSFileManager defaultManager];
         
@@ -219,7 +223,7 @@ static void findAndPatch(void) {
         while ((file = [enumerator nextObject])) {
             if ([file hasSuffix:@"blackrussia-client"] && ![file containsString:@".dSYM"]) {
                 NSString *fullPath = [bundlePath stringByAppendingPathComponent:file];
-                logMsg("INFO", [[NSString stringWithFormat:@"✅ Найден файл: %@", fullPath] UTF8String]);
+                logMsg([[NSString stringWithFormat:@"✅ Найден файл: %@", fullPath] UTF8String]);
                 patch([fullPath UTF8String]);
                 return;
             }
@@ -233,14 +237,14 @@ static void findAndPatch(void) {
         
         for (int i = 0; paths[i] != NULL; i++) {
             if (access(paths[i], F_OK) == 0) {
-                logMsg("INFO", [[NSString stringWithFormat:@"✅ Найден файл: %s", paths[i]] UTF8String]);
+                logMsg([[NSString stringWithFormat:@"✅ Найден файл: %s", paths[i]] UTF8String]);
                 patch(paths[i]);
                 return;
             }
         }
         
-        logMsg("ERROR", "Файл не найден нигде");
-        notify("❌ ОШИБКА", "Файл не найден\nПроверь лог в Загрузках");
+        logMsg("❌ Файл не найден нигде");
+        notify("❌ ОШИБКА", "Файл не найден\nПроверь лог в папке saves");
     }
 }
 
@@ -253,7 +257,7 @@ __attribute__((constructor)) static void init(void) {
         findAndPatch();
         
         printf("\n═══════════════════════════════════════════════\n");
-        printf("📁 Лог: Загрузки/hitbox_patch.log\n");
+        printf("📁 Лог: saves/hitbox_patch.log\n");
         printf("═══════════════════════════════════════════════\n\n");
     }
 }
