@@ -13,28 +13,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile to dylib (arm64 iOS)
+      - name: Build Hitbox Patcher
         run: |
-          # Компилируем C++ с правильными флагами
-          xcrun -sdk iphoneos clang++ \
-            -arch arm64 \
-            -dynamiclib \
-            -framework Foundation \
-            -framework UIKit \
-            -stdlib=libc++ \
-            -std=c++17 \
-            -O3 \
-            -o mylib.dylib \
-            main.mm
-          
-          # Проверяем
-          echo "✅ Dylib создан:"
-          ls -la mylib.dylib
-          file mylib.dylib
-          lipo -info mylib.dylib
+          xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -stdlib=libc++ -std=c++17 -O3 \
+            -o hitbox.dylib main.mm
 
-      - name: Upload built dylib
+      - name: Build Anti-Kick Module
+        run: |
+          xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -stdlib=libc++ -std=c++17 -O3 \
+            -o antikick.dylib antikick.mm
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mylib
-          path: mylib.dylib
+          name: modules
+          path: |
+            hitbox.dylib
+            antikick.dylib
