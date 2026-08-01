@@ -17,32 +17,25 @@ jobs:
         run: |
           echo "🔨 Building modules..."
           
-          # 1. Hitbox Patcher
           echo "📦 Building hitbox.dylib..."
           xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
             -framework Foundation -framework UIKit \
             -stdlib=libc++ -std=c++17 -O3 \
             -o hitbox.dylib main.mm
           
-          # 2. Anti-Kick
           echo "📦 Building antikick.dylib..."
           xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -framework Foundation -framework UIKit -framework AVFoundation \
             -O3 -o antikick.dylib antikick.mm
           
-          # 3. No Reload Patch
           echo "📦 Building norelpatch.dylib..."
           xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -framework Foundation -framework UIKit \
-            -O3 -o norelpatch.dylib norelpatch.mm
+            -O3 -o norelpatch.dylib norelpatch.mm -lz
           
           echo ""
           echo "✅ All modules built:"
           ls -la *.dylib
-          
-          echo ""
-          echo "📋 File info:"
-          file *.dylib
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
