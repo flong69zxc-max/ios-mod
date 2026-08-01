@@ -1,90 +1,33 @@
-name: Build iOS dylib (fat)
+name: Build Pure Dylib
 
 on:
   push:
-    branches: ["main", "master"]
-  workflow_dispatch:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    container:
+      image: angelxwind/theos:latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3
 
-      - name: Set up environment
+      - name: Build project
+        run: make
+
+      - name: Collect dylib and plist
         run: |
-          echo "SDK=iphoneos" >> $GITHUB_ENV
-          echo "MIN_IOS_VERSION=12.0" >> $GITHUB_ENV
+          mkdir -p compiled
+          find .theos/obj -name "*.dylib" -exec cp {} compiled/ \;
+          find .theos/obj -name "*.plist" -exec cp {} compiled/ \;
+          ls -la compiled/
 
-      - name: Static analysis (clang --analyze)
-        run: |
-          xcrun -sdk $SDK clang --analyze \
-            -arch arm64 \
-            -F Foundation -F UIKit \
-            -framework Foundation \
-            -framework UIKit \
-            -framework Security \
-            -framework CoreFoundation \
-            main.m
-
-      - name: Compile arm64 dylib
-        run: |
-          xcrun -sdk $SDK clang \
-            -arch arm64 \
-            -mios-version-min=$MIN_IOS_VERSION \
-            -dynamiclib \
-            -framework Foundation \
-            -framework UIKit \
-            -framework Security \
-            -framework CoreFoundation \
-            -o main-arm64.dylib \
-            main.m
-
-      - name: Compile arm64e dylib
-        run: |
-          xcrun -sdk $SDK clang \
-            -arch arm64e \
-            -mios-version-min=$MIN_IOS_VERSION \
-            -dynamiclib \
-            -framework Foundation \
-            -framework UIKit \
-            -framework Security \
-            -framework CoreFoundation \
-            -o main-arm64e.dylib \
-            main.m
-
-      - name: Create fat (universal) dylib
-        run: |
-          lipo -create main-arm64.dylib main-arm64e.dylib -output main.dylib
-          lipo -info main.dylib
-
-      - name: Verify architecture
-        run: |
-          echo "File type:"
-          file main.dylib
-          echo "Architectures in fat binary:"
-          lipo -info main.dylib
-
-      - name: Ad-hoc code sign
-        run: |
-          codesign --sign - --force --timestamp=none main.dylib
-          echo "dylib signed (ad-hoc)"
-
-      - name: Calculate checksums
-        run: |
-          shasum -a 256 main.dylib > main.dylib.sha256
-          echo "SHA256: $(cat main.dylib.sha256)"
-
-      - name: Package artifact
-        run: |
-          mkdir -p output
-          cp main.dylib main.dylib.sha256 output/
-          cd output && zip ../main-dylib-fat.zip *
-
-      - name: Upload dylib
-        uses: actions/upload-artifact@v4
+      - name: Upload Dylib Artifact
+        uses: actions/upload-artifact@v3
         with:
-          name: main-dylib-fat-${{ github.run_id }}
-          path: main-dylib-fat.zip
+          name: LowPowerMock-Dylib
+          path: compiled/*
