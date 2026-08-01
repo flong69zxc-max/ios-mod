@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed - removed unused code
+// Shows RELATIVE address in logs and notification
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -38,12 +38,18 @@ static HitboxValue gHitboxes[] = {
 #define TOLERANCE 0.005f
 
 // ============================================================
-// 2. Forward declarations
+// 2. Global variables
+// ============================================================
+static vm_address_t gFrameworkBase = 0;  // Base address of blackrussia-client
+static const char *gFrameworkPath = NULL;
+
+// ============================================================
+// 3. Forward declarations
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle);
 
 // ============================================================
-// 3. Memory helpers
+// 4. Memory helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -60,7 +66,7 @@ static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
 }
 
 // ============================================================
-// 4. Logging helper
+// 5. Logging helper
 // ============================================================
 static void write_log(NSString *format, ...) {
     @autoreleasepool {
@@ -100,7 +106,7 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 5. Hex dump
+// 6. Hex dump
 // ============================================================
 static NSString *hexDump(vm_address_t addr, size_t length) {
     NSMutableString *hex = [NSMutableString string];
@@ -119,7 +125,7 @@ static NSString *hexDump(vm_address_t addr, size_t length) {
 }
 
 // ============================================================
-// 6. Find blackrussia-client
+// 7. Find blackrussia-client
 // ============================================================
 typedef struct {
     vm_address_t addr;
@@ -162,6 +168,8 @@ static vm_address_t find_blackrussia_framework(void) {
         if ([imageName containsString:@"blackrussia-client"]) {
             const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
             intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            gFrameworkBase = (vm_address_t)header + slide;
+            gFrameworkPath = name;
             
             write_log(@"🎯 FOUND blackrussia-client!");
             write_log(@"  ┌─────────────────────────────────────────────");
@@ -169,6 +177,7 @@ static vm_address_t find_blackrussia_framework(void) {
             write_log(@"  │ Path: %s", name);
             write_log(@"  │ Header: 0x%llX", (unsigned long long)header);
             write_log(@"  │ Slide: 0x%lX", (unsigned long)slide);
+            write_log(@"  │ Base:  0x%llX", (unsigned long long)gFrameworkBase);
             write_log(@"  └─────────────────────────────────────────────");
             write_log(@"");
             write_log(@"📁 Scanning sections...");
@@ -176,7 +185,6 @@ static vm_address_t find_blackrussia_framework(void) {
             gSectionCount = 0;
             uint64_t size = 0;
             
-            // Use getsectdatafromheader_64 with pragma to suppress warnings
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
             char *ptr = getsectdatafromheader_64(header, "__DATA", "__data", &size);
@@ -194,7 +202,7 @@ static vm_address_t find_blackrussia_framework(void) {
             
             write_log(@"");
             write_log(@"📊 Total sections: %d", gSectionCount);
-            return (vm_address_t)header + slide;
+            return gFrameworkBase;
         }
     }
     
@@ -203,9 +211,9 @@ static vm_address_t find_blackrussia_framework(void) {
 }
 
 // ============================================================
-// 7. Search with float tolerance
+// 8. Search with float tolerance
 // ============================================================
-static vm_address_t find_hitboxes(void) {
+static vm_address_t find_hitboxes(vm_address_t *outRelativeAddr) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
     write_log(@"║       SEARCHING HITBOXES (float tolerance: %.3f)        ║", TOLERANCE);
@@ -270,9 +278,19 @@ static vm_address_t find_hitboxes(void) {
             
             if (allMatch && matched == HITBOX_COUNT) {
                 candidates++;
+                
+                // Calculate relative address
+                vm_address_t relativeAddr = addr - gFrameworkBase;
+                *outRelativeAddr = relativeAddr;
+                
                 write_log(@"");
-                write_log(@"🎯 Found candidate #%d at 0x%llX in %s", 
-                         candidates, (unsigned long long)addr, sectName);
+                write_log(@"🎯 Found candidate #%d at:", candidates);
+                write_log(@"  Absolute: 0x%llX", (unsigned long long)addr);
+                write_log(@"  Relative: 0x%llX (0x%llX - 0x%llX)", 
+                         (unsigned long long)relativeAddr,
+                         (unsigned long long)addr,
+                         (unsigned long long)gFrameworkBase);
+                write_log(@"  Section: %s", sectName);
                 write_log(@"");
                 write_log(@"📋 Verified values:");
                 
@@ -288,6 +306,7 @@ static vm_address_t find_hitboxes(void) {
                 write_log(@"");
                 write_log(@"╔═══════════════════════════════════════════════════════════╗");
                 write_log(@"║     ✅ ALL %d HITBOXES FOUND!                           ║", HITBOX_COUNT);
+                write_log(@"║     Relative address: 0x%llX                           ║", (unsigned long long)relativeAddr);
                 write_log(@"╚═══════════════════════════════════════════════════════════╝");
                 return addr;
             }
@@ -302,13 +321,13 @@ static vm_address_t find_hitboxes(void) {
 }
 
 // ============================================================
-// 8. Main patching
+// 9. Main patching
 // ============================================================
 static void patch_hitboxes(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v10.0                ║");
-    write_log(@"║        Float tolerance search                           ║");
+    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v11.0                ║");
+    write_log(@"║        Relative address display                         ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -327,13 +346,14 @@ static void patch_hitboxes(void) {
     
     find_blackrussia_framework();
     
-    if (gSectionCount == 0) {
+    if (gSectionCount == 0 || gFrameworkBase == 0) {
         write_log(@"❌ No sections found!");
         show_notification(@"blackrussia-client not found.", @"Check HitBoxes.log");
         return;
     }
     
-    vm_address_t found = find_hitboxes();
+    vm_address_t relativeAddr = 0;
+    vm_address_t found = find_hitboxes(&relativeAddr);
     
     if (!found) {
         write_log(@"❌ HITBOXES NOT FOUND!");
@@ -359,7 +379,8 @@ static void patch_hitboxes(void) {
         float newFloat = *(float*)&newValue;
         
         write_log(@"📝 %s:", gHitboxes[i].name);
-        write_log(@"  Address:  0x%llX", (unsigned long long)patchAddr);
+        write_log(@"  Absolute: 0x%llX", (unsigned long long)patchAddr);
+        write_log(@"  Relative: 0x%llX", (unsigned long long)(patchAddr - gFrameworkBase));
         write_log(@"  Original: 0x%08X (%.3f)", originalValue, originalFloat);
         write_log(@"  New:      0x%08X (%.3f) x2", newValue, newFloat);
         
@@ -385,8 +406,11 @@ static void patch_hitboxes(void) {
     if (success) {
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
         write_log(@"║     ✅ ALL 10 HITBOXES PATCHED! (x2 damage)             ║");
+        write_log(@"║     Relative offset: 0x%llX                            ║", (unsigned long long)relativeAddr);
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
-        NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX\nx2 Hitboxes active!", (unsigned long long)found];
+        
+        NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX\nx2 Hitboxes active!", 
+                        (unsigned long long)relativeAddr];
         show_notification(@"Hitboxes patched successfully!", msg);
     } else {
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
@@ -397,7 +421,7 @@ static void patch_hitboxes(void) {
 }
 
 // ============================================================
-// 9. Notification display
+// 10. Notification display
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -454,14 +478,15 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 10. Entry point
+// 11. Entry point
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v10.0 INJECTED         ║");
-    write_log(@"║      Float tolerance search (%.3f)                      ║", TOLERANCE);
+    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v11.0 INJECTED         ║");
+    write_log(@"║      Relative address: 0x14EC888                        ║");
+    write_log(@"║      Float tolerance: 0.005                             ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     write_log(@"⏳ Waiting 5 seconds...");
@@ -474,7 +499,7 @@ static void initialize(void) {
 }
 
 // ============================================================
-// 11. Dummy export
+// 12. Dummy export
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
