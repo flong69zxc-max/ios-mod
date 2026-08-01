@@ -1,9 +1,8 @@
-// norelpatch.mm - Works with br_anim.bpc (ZIP archive)
+// norelpatch.mm - Extract ZIP, patch, repack (using system commands)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <zlib.h>
-#include <zip.h>
 
 static bool isPatched = NO;
 static int retryCount = 0;
@@ -66,74 +65,6 @@ static void hex_dump(NSData *data, NSRange range) {
     }
 }
 
-static NSData* zip_read_file(NSString *zipPath, NSString *fileName) {
-    // Открываем ZIP
-    int err = 0;
-    zip_t *zip = zip_open([zipPath fileSystemRepresentation], ZIP_RDONLY, &err);
-    if (!zip) {
-        write_log(@"❌ Can't open ZIP: %d", err);
-        return nil;
-    }
-    
-    // Ищем файл
-    struct zip_stat st;
-    zip_stat_init(&st);
-    zip_stat(zip, [fileName UTF8String], 0, &st);
-    
-    if (!(st.valid & ZIP_STAT_SIZE)) {
-        write_log(@"❌ File '%@' not found in ZIP", fileName);
-        zip_close(zip);
-        return nil;
-    }
-    
-    // Читаем файл
-    zip_file_t *file = zip_fopen(zip, [fileName UTF8String], 0);
-    if (!file) {
-        write_log(@"❌ Can't open file in ZIP");
-        zip_close(zip);
-        return nil;
-    }
-    
-    NSMutableData *data = [NSMutableData dataWithLength:st.size];
-    zip_fread(file, data.mutableBytes, st.size);
-    zip_fclose(file);
-    zip_close(zip);
-    
-    write_log(@"✅ Read '%@' from ZIP (%llu bytes)", fileName, st.size);
-    return data;
-}
-
-static bool zip_write_file(NSString *zipPath, NSString *fileName, NSData *data) {
-    // Открываем ZIP для записи
-    int err = 0;
-    zip_t *zip = zip_open([zipPath fileSystemRepresentation], ZIP_CREATE | ZIP_TRUNCATE, &err);
-    if (!zip) {
-        write_log(@"❌ Can't create ZIP: %d", err);
-        return false;
-    }
-    
-    // Добавляем файл
-    zip_source_t *source = zip_source_buffer(zip, data.bytes, data.length, 0);
-    if (!source) {
-        write_log(@"❌ Can't create source");
-        zip_close(zip);
-        return false;
-    }
-    
-    zip_int64_t index = zip_file_add(zip, [fileName UTF8String], source, ZIP_FL_OVERWRITE);
-    if (index < 0) {
-        write_log(@"❌ Can't add file to ZIP");
-        zip_source_free(source);
-        zip_close(zip);
-        return false;
-    }
-    
-    // Закрываем
-    zip_close(zip);
-    write_log(@"✅ Written '%@' to ZIP", fileName);
-    return true;
-}
-
 static NSData* patch_reload_strings(NSData *data, NSString *fileName) {
     NSMutableData *newData = [data mutableCopy];
     int patched = 0;
@@ -156,7 +87,6 @@ static NSData* patch_reload_strings(NSData *data, NSString *fileName) {
             write_log(@"");
             write_log(@"🔍 Found '%@' in %@ at offset 0x%08lX", search, fileName, (unsigned long)range.location);
             
-            // Показываем контекст
             NSUInteger start = range.location > 16 ? range.location - 16 : 0;
             NSUInteger end = range.location + range.length + 16;
             if (end > data.length) end = data.length;
@@ -165,7 +95,6 @@ static NSData* patch_reload_strings(NSData *data, NSString *fileName) {
             write_log(@"   Context (hex):");
             hex_dump(data, contextRange);
             
-            // Заменяем на нули
             uint8_t zeros[64] = {0};
             NSData *replaceData = [NSData dataWithBytes:zeros length:range.length];
             [newData replaceBytesInRange:range withBytes:replaceData.bytes length:replaceData.length];
@@ -188,7 +117,7 @@ static NSData* patch_reload_strings(NSData *data, NSString *fileName) {
 static void patch_zip(NSString *zipPath) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-    write_log(@"║  🔥 PATCHING br_anim.bpc (ZIP archive)                     ║");
+    write_log(@"║  🔥 PATCHING br_anim.bpc                                    ║");
     write_log(@"╚═══════════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -207,116 +136,97 @@ static void patch_zip(NSString *zipPath) {
         write_log(@"💾 Backup: %@", backupPath.lastPathComponent);
     }
     
-    // Файлы которые нужно патчить внутри ZIP
-    NSArray *filesToPatch = @[
-        @"python.ani",
-        @"shotgun.ani"
-    ];
+    // Временная папка
+    NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"br_anim_extract"];
+    [fm removeItemAtPath:tempDir error:nil];
+    [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
+    write_log(@"📂 Temp dir: %@", tempDir);
     
+    // Распаковываем используя /usr/bin/unzip (есть на iOS)
+    NSTask *unzipTask = [[NSTask alloc] init];
+    [unzipTask setLaunchPath:@"/usr/bin/unzip"];
+    [unzipTask setArguments:@[@"-o", zipPath, @"-d", tempDir]];
+    
+    NSPipe *pipe = [NSPipe pipe];
+    [unzipTask setStandardOutput:pipe];
+    [unzipTask setStandardError:pipe];
+    
+    @try {
+        [unzipTask launch];
+        [unzipTask waitUntilExit];
+        write_log(@"✅ Unzipped successfully");
+    } @catch (NSException *e) {
+        write_log(@"❌ Unzip failed: %@", e);
+        [fm removeItemAtPath:tempDir error:nil];
+        return;
+    }
+    
+    // Ищем и патчим .ani файлы
+    NSArray *aniFiles = @[@"python.ani", @"shotgun.ani"];
     bool anyPatched = false;
     
-    for (NSString *fileName in filesToPatch) {
-        write_log(@"");
-        write_log(@"📂 Reading %@ from ZIP...", fileName);
-        
-        NSData *fileData = zip_read_file(zipPath, fileName);
-        if (!fileData) {
-            write_log(@"❌ Can't read %@ from ZIP", fileName);
+    for (NSString *aniFile in aniFiles) {
+        NSString *aniPath = [tempDir stringByAppendingPathComponent:aniFile];
+        if (![fm fileExistsAtPath:aniPath]) {
+            write_log(@"⚠️ %@ not found in archive", aniFile);
             continue;
         }
         
-        NSData *patchedData = patch_reload_strings(fileData, fileName);
+        write_log(@"");
+        write_log(@"📁 Found: %@", aniFile);
+        
+        NSData *aniData = [NSData dataWithContentsOfFile:aniPath];
+        if (!aniData) {
+            write_log(@"❌ Can't read %@", aniFile);
+            continue;
+        }
+        
+        NSData *patchedData = patch_reload_strings(aniData, aniFile);
         if (patchedData) {
-            write_log(@"💾 Writing patched %@ back to ZIP...", fileName);
-            
-            // Пересоздаём ZIP с патченым файлом
-            // Проще: читаем все файлы, патчим нужные, пересоздаём ZIP
-            // Но для простоты - распаковываем, патчим, запаковываем
-            
-            NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"br_anim_patch"];
-            [fm removeItemAtPath:tempDir error:nil];
-            [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
-            
-            // Распаковываем весь ZIP во временную папку
-            int err = 0;
-            zip_t *zip = zip_open([zipPath fileSystemRepresentation], ZIP_RDONLY, &err);
-            if (zip) {
-                zip_int64_t numEntries = zip_get_num_entries(zip, 0);
-                for (zip_int64_t i = 0; i < numEntries; i++) {
-                    struct zip_stat st;
-                    zip_stat_init(&st);
-                    zip_stat_index(zip, i, 0, &st);
-                    
-                    NSString *name = [NSString stringWithUTF8String:st.name];
-                    if (!name) continue;
-                    
-                    zip_file_t *file = zip_fopen_index(zip, i, 0);
-                    if (file) {
-                        NSMutableData *data = [NSMutableData dataWithLength:st.size];
-                        zip_fread(file, data.mutableBytes, st.size);
-                        zip_fclose(file);
-                        
-                        // Если это файл который патчим
-                        if ([name hasSuffix:@".ani"] && [filesToPatch containsObject:name]) {
-                            NSData *patched = patch_reload_strings(data, name);
-                            if (patched) {
-                                data = [patched mutableCopy];
-                                anyPatched = true;
-                            }
-                        }
-                        
-                        NSString *outPath = [tempDir stringByAppendingPathComponent:name];
-                        NSString *outDir = [outPath stringByDeletingLastPathComponent];
-                        [fm createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:nil];
-                        [data writeToFile:outPath atomically:YES];
-                    }
-                }
-                zip_close(zip);
-            }
-            
-            // Запаковываем обратно
-            if (anyPatched) {
-                write_log(@"📦 Repacking ZIP...");
-                
-                zip_t *newZip = zip_open([zipPath fileSystemRepresentation], ZIP_CREATE | ZIP_TRUNCATE, &err);
-                if (newZip) {
-                    NSArray *allFiles = [fm subpathsOfDirectoryAtPath:tempDir error:nil];
-                    for (NSString *file in allFiles) {
-                        NSString *fullPath = [tempDir stringByAppendingPathComponent:file];
-                        BOOL isDir = NO;
-                        [fm fileExistsAtPath:fullPath isDirectory:&isDir];
-                        if (isDir) continue;
-                        
-                        NSData *fileData = [NSData dataWithContentsOfFile:fullPath];
-                        if (fileData) {
-                            zip_source_t *source = zip_source_buffer(newZip, fileData.bytes, fileData.length, 0);
-                            if (source) {
-                                zip_file_add(newZip, [file UTF8String], source, ZIP_FL_OVERWRITE);
-                            }
-                        }
-                    }
-                    zip_close(newZip);
-                    write_log(@"✅ ZIP repacked successfully!");
-                }
-            }
-            
-            [fm removeItemAtPath:tempDir error:nil];
+            [patchedData writeToFile:aniPath atomically:YES];
+            write_log(@"✅ %@ patched and saved", aniFile);
+            anyPatched = true;
         }
     }
     
-    if (anyPatched) {
+    if (!anyPatched) {
         write_log(@"");
-        write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-        write_log(@"║  ✅ PATCH COMPLETE!                                         ║");
-        write_log(@"║  💾 Backup: br_anim.bpc.original                            ║");
-        write_log(@"╚═══════════════════════════════════════════════════════════════╝");
-    } else {
-        write_log(@"");
-        write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-        write_log(@"║  ⚠️ NOTHING PATCHED!                                        ║");
-        write_log(@"║  No reload strings found in .ani files                      ║");
-        write_log(@"╚═══════════════════════════════════════════════════════════════╝");
+        write_log(@"⚠️ Nothing to patch! No reload strings found.");
+        [fm removeItemAtPath:tempDir error:nil];
+        return;
     }
+    
+    // Запаковываем обратно
+    write_log(@"");
+    write_log(@"📦 Repacking ZIP...");
+    
+    NSTask *zipTask = [[NSTask alloc] init];
+    [zipTask setLaunchPath:@"/usr/bin/zip"];
+    [zipTask setArguments:@[@"-r", zipPath, @"."]];
+    [zipTask setCurrentDirectoryPath:tempDir];
+    
+    NSPipe *zipPipe = [NSPipe pipe];
+    [zipTask setStandardOutput:zipPipe];
+    [zipTask setStandardError:zipPipe];
+    
+    @try {
+        [zipTask launch];
+        [zipTask waitUntilExit];
+        write_log(@"✅ ZIP repacked successfully!");
+    } @catch (NSException *e) {
+        write_log(@"❌ Zip failed: %@", e);
+        [fm removeItemAtPath:tempDir error:nil];
+        return;
+    }
+    
+    // Чистим
+    [fm removeItemAtPath:tempDir error:nil];
+    
+    write_log(@"");
+    write_log(@"╔═══════════════════════════════════════════════════════════════╗");
+    write_log(@"║  ✅ PATCH COMPLETE!                                         ║");
+    write_log(@"║  💾 Backup: br_anim.bpc.original                            ║");
+    write_log(@"╚═══════════════════════════════════════════════════════════════╝");
 }
 
 static void patch_all(void) {
@@ -328,8 +238,8 @@ static void patch_all(void) {
         
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-        write_log(@"║  🔥 NO RELOAD PATCHER v3.0 (ZIP SUPPORT)                   ║");
-        write_log(@"║  ✅ Extracts br_anim.bpc, patches .ani files, repacks       ║");
+        write_log(@"║  🔥 NO RELOAD PATCHER v3.0                                 ║");
+        write_log(@"║  ✅ Extracts br_anim.bpc, patches .ani, repacks             ║");
         write_log(@"╚═══════════════════════════════════════════════════════════════╝");
         write_log(@"");
         
