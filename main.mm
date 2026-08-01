@@ -1,42 +1,3 @@
-// main.mm - Black Russia Hitbox Modifier
-// Компиляция: clang++ -arch arm64 -std=c++17 -O2 -fobjc-arc -dynamiclib -framework UIKit -framework Metal -framework MetalKit -framework Foundation -framework CoreGraphics -framework QuartzCore -I./imgui -I./imgui/backends main.mm -o blackrussia_hitbox.dylib
-
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
-#import <Metal/Metal.h>
-#import <MetalKit/MetalKit.h>
-#import <mach-o/dyld.h>
-#import <mach/mach.h>
-#import <dlfcn.h>
-#import <sys/mman.h>
-#import <sys/stat.h>
-#import <objc/runtime.h>
-
-// ImGui
-#include "imgui.h"
-#include "imgui_impl_metal.h"
-
-// ============================================================================
-// MARK: - Конфигурация
-// ============================================================================
-
-#define HITBOX_COUNT 10
-#define HITBOX_STRIDE 0x20
-#define CACHE_FILE "br_cache.dat"
-#define SEARCH_TIMEOUT 30.0
-
-// Стоковые значения
-static const float DEFAULT_HITBOXES[HITBOX_COUNT] = {
-    0.15f, 0.20f, 0.25f, 0.25f, 0.16f, 0.16f, 0.20f, 0.20f, 0.15f, 0.15f
-};
-
-// Части тела
-static const char* BODY_PART_NAMES[HITBOX_COUNT] = {
-    "HEAD", "TORSO_1", "TORSO_2", "TORSO_3", 
-    "L_ARM_UP", "L_ARM_LOW", "R_ARM_UP", "R_ARM_LOW",
-    "L_LEG", "R_LEG"
-};
-
 // ============================================================================
 // MARK: - Глобальные переменные
 // ============================================================================
@@ -50,175 +11,7 @@ static float g_globalMultiplier = 1.0f;
 static UIWindow* g_overlayWindow = nil;
 static UIButton* g_floatButton = nil;
 static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
-
-// ============================================================================
-// MARK: - Менеджер памяти
-// ============================================================================
-
-@interface MemoryManager : NSObject
-+ (bool)writeFloatArray:(float*)data atAddress:(void*)address count:(size_t)count;
-+ (bool)validateAddress:(void*)address;
-+ (void*)findHitboxAddress;
-@end
-
-@implementation MemoryManager
-
-+ (bool)writeFloatArray:(float*)data atAddress:(void*)address count:(size_t)count {
-    if (!address || !data || count == 0) return false;
-    
-    size_t size = count * sizeof(float);
-    vm_address_t pageStart = (vm_address_t)address & ~(vm_page_size - 1);
-    vm_size_t pageSize = size + ((vm_address_t)address - pageStart);
-    
-    // Снимаем защиту
-    kern_return_t kr = vm_protect(mach_task_self(), pageStart, pageSize, 0, VM_PROT_READ | VM_PROT_WRITE);
-    if (kr != KERN_SUCCESS) {
-        NSLog(@"[BR] Не удалось снять защиту: %d", kr);
-        return false;
-    }
-    
-    // Записываем данные
-    memcpy(address, data, size);
-    
-    // Возвращаем защиту
-    kr = vm_protect(mach_task_self(), pageStart, pageSize, 0, VM_PROT_READ | VM_PROT_EXECUTE);
-    if (kr != KERN_SUCCESS) {
-        NSLog(@"[BR] Не удалось вернуть защиту: %d", kr);
-    }
-    
-    return true;
-}
-
-+ (bool)validateAddress:(void*)address {
-    if (!address) return false;
-    
-    float test[2];
-    memcpy(test, address, sizeof(float) * 2);
-    
-    // Проверяем первое значение
-    if (fabs(test[0] - DEFAULT_HITBOXES[0]) > 0.01f) return false;
-    
-    // Проверяем второе значение через stride
-    float* second = (float*)((uintptr_t)address + HITBOX_STRIDE);
-    memcpy(&test[1], second, sizeof(float));
-    if (fabs(test[1] - DEFAULT_HITBOXES[1]) > 0.01f) return false;
-    
-    return true;
-}
-
-+ (bool)scanRegion:(const struct mach_header_64*)header size:(size_t)size address:(void**)outAddress {
-    uintptr_t start = (uintptr_t)header;
-    uintptr_t end = start + size;
-    
-    // Сканируем с шагом 4 байта
-    for (uintptr_t addr = start; addr < end - (HITBOX_COUNT * HITBOX_STRIDE); addr += 4) {
-        float* current = (float*)addr;
-        
-        // Проверяем сигнатуру
-        bool found = true;
-        for (int i = 0; i < HITBOX_COUNT; i++) {
-            float* checkAddr = (float*)(addr + i * HITBOX_STRIDE);
-            if (fabs(*checkAddr - DEFAULT_HITBOXES[i]) > 0.01f) {
-                found = false;
-                break;
-            }
-        }
-        
-        if (found) {
-            // Дополнительная проверка: HEAD < TORSO
-            float* head = (float*)addr;
-            float* torso1 = (float*)(addr + HITBOX_STRIDE);
-            float* torso2 = (float*)(addr + 2 * HITBOX_STRIDE);
-            
-            if (*head < *torso1 && *torso1 <= *torso2) {
-                *outAddress = (void*)addr;
-                return true;
-            }
-        }
-    }
-    
-    return false;
-}
-
-+ (void*)findHitboxAddress {
-    // Проверяем кэш
-    void* cached = [self loadCache];
-    if (cached && [self validateAddress:cached]) {
-        NSLog(@"[BR] Загружен адрес из кэша: %p", cached);
-        return cached;
-    }
-    
-    NSLog(@"[BR] Начинаем поиск адреса...");
-    
-    // Ищем библиотеку
-    void* address = NULL;
-    uint32_t imageCount = _dyld_image_count();
-    
-    for (uint32_t i = 0; i < imageCount; i++) {
-        const char* name = _dyld_get_image_name(i);
-        if (!name) continue;
-        
-        NSString* path = [NSString stringWithUTF8String:name];
-        if ([path containsString:@"blackrussia-client"]) {
-            const struct mach_header_64* header = (const struct mach_header_64*)_dyld_get_image_header(i);
-            if (!header) continue;
-            
-            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-            
-            // Сканируем сегменты
-            uintptr_t cmdPtr = (uintptr_t)header + sizeof(struct mach_header_64);
-            for (uint32_t j = 0; j < header->ncmds; j++) {
-                struct load_command* cmd = (struct load_command*)cmdPtr;
-                
-                if (cmd->cmd == LC_SEGMENT_64) {
-                    struct segment_command_64* seg = (struct segment_command_64*)cmd;
-                    
-                    // Сканируем только загруженные сегменты
-                    if (seg->fileoff != 0) {
-                        void* segAddr = (void*)(seg->vmaddr + slide);
-                        if ([self scanRegion:(const struct mach_header_64*)segAddr 
-                                         size:seg->vmsize 
-                                     address:&address]) {
-                            [self saveCache:address];
-                            return address;
-                        }
-                    }
-                }
-                
-                cmdPtr += cmd->cmdsize;
-            }
-        }
-    }
-    
-    return NULL;
-}
-
-+ (void)saveCache:(void*)address {
-    NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    if (paths.count == 0) return;
-    
-    NSString* cachePath = [[paths firstObject] stringByAppendingPathComponent:@CACHE_FILE];
-    uintptr_t addr = (uintptr_t)address;
-    NSData* data = [NSData dataWithBytes:&addr length:sizeof(addr)];
-    [data writeToFile:cachePath atomically:YES];
-}
-
-+ (void*)loadCache {
-    NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    if (paths.count == 0) return NULL;
-    
-    NSString* cachePath = [[paths firstObject] stringByAppendingPathComponent:@CACHE_FILE];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:cachePath]) return NULL;
-    
-    NSData* data = [NSData dataWithContentsOfFile:cachePath];
-    if (data.length != sizeof(uintptr_t)) return NULL;
-    
-    uintptr_t addr;
-    [data getBytes:&addr length:sizeof(addr)];
-    return (void*)addr;
-}
-
-@end
+static MetalRenderer* g_renderer = nil;  // ← Добавить глобальную ссылку
 
 // ============================================================================
 // MARK: - ImGui Metal Backend
@@ -230,10 +23,11 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
 @property (nonatomic, strong) CAMetalLayer* metalLayer;
 @property (nonatomic, strong) UIWindow* window;
 @property (nonatomic, strong) CADisplayLink* displayLink;
+@property (nonatomic, assign) BOOL menuVisible;  // ← Добавить свойство
 @end
 
 @implementation MetalRenderer {
-    ImGui_ImplMetal_Data* _imguiMetalData;
+    // Убрать ImGui_ImplMetal_Data* _imguiMetalData; - он не нужен
     MTLRenderPassDescriptor* _renderPassDescriptor;
     id<MTLTexture> _depthTexture;
 }
@@ -242,6 +36,7 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     self = [super init];
     if (self) {
         _window = window;
+        _menuVisible = NO;  // ← Инициализация
         [self setupMetal];
         [self setupImGui];
     }
@@ -255,11 +50,16 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     _metalLayer = [CAMetalLayer layer];
     _metalLayer.device = _device;
     _metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    _metalLayer.drawableSize = _window.bounds.size;
-    _metalLayer.frame = _window.bounds;
     
-    _window.layer = _metalLayer;
-    _window.layer.opaque = NO;
+    // Исправление: используем screen bounds
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    _metalLayer.drawableSize = screenBounds.size;
+    _metalLayer.frame = screenBounds;
+    _metalLayer.backgroundColor = CGColorCreate(CGColorSpaceCreateDeviceRGB(), (CGFloat[]){0, 0, 0, 0});
+    
+    // Исправление: установка layer через rootViewController
+    _window.rootViewController.view.layer = _metalLayer;
+    _window.rootViewController.view.layer.opaque = NO;
     
     _renderPassDescriptor = [MTLRenderPassDescriptor renderPassDescriptor];
     _renderPassDescriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
@@ -274,7 +74,8 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(_window.bounds.size.width, _window.bounds.size.height);
+    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    io.DisplaySize = ImVec2(screenBounds.size.width, screenBounds.size.height);
     io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
     
     // iOS стиль
@@ -292,11 +93,13 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     style.ScrollbarRounding = 6.0f;
     style.GrabRounding = 6.0f;
     
+    // Исправление: правильная инициализация Metal бэкенда
     ImGui_ImplMetal_Init(_device);
 }
 
 - (void)renderLoop {
-    if (!_menuVisible && !g_floatButton.highlighted) {
+    // Исправление: используем self.menuVisible
+    if (!self.menuVisible && !g_floatButton.highlighted) {
         return;
     }
     
@@ -311,14 +114,16 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
         id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:_renderPassDescriptor];
         
         // Отрисовка ImGui
-        if (_menuVisible) {
+        if (self.menuVisible) {
             ImGui_ImplMetal_NewFrame(_renderPassDescriptor);
             ImGui::NewFrame();
             
             [self drawMenu];
             
             ImGui::Render();
-            ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), encoder);
+            
+            // Исправление: правильный вызов RenderDrawData с 3 аргументами
+            ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), commandBuffer, encoder);
         }
         
         [encoder endEncoding];
@@ -352,6 +157,7 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
         return;
     }
     
+    // Исправление: используем self.menuVisible
     ImGui::Begin("BlackRussia Hitbox", &_menuVisible, ImGuiWindowFlags_AlwaysAutoResize);
     
     // Заголовок с адресом
@@ -368,13 +174,16 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     
     ImGui::Separator();
     
-    // Быстрые множители
+    // Быстрые множители - исправление std::to_string
     ImGui::Text("Quick Presets:");
     const float presets[2][3] = {{1.5f, 2.0f, 3.0f}, {4.0f, 6.0f, 10.0f}};
     for (int row = 0; row < 2; row++) {
         for (int col = 0; col < 3; col++) {
             float val = presets[row][col];
-            if (ImGui::Button(("%.1fx##preset" + std::to_string(row * 3 + col)).c_str(), ImVec2(60, 30))) {
+            // Исправление: используем sprintf вместо std::to_string
+            char label[32];
+            sprintf(label, "%.1fx##preset%d", val, row * 3 + col);
+            if (ImGui::Button(label, ImVec2(60, 30))) {
                 g_globalMultiplier = val;
                 for (int i = 0; i < HITBOX_COUNT; i++) {
                     g_currentValues[i] = g_originalValues[i] * val;
@@ -421,66 +230,13 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     ImGui::End();
 }
 
-- (void)saveConfig {
-    NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    if (paths.count == 0) return;
-    
-    NSString* path = [[paths firstObject] stringByAppendingPathComponent:@"hitbox_config.json"];
-    NSMutableDictionary* config = [NSMutableDictionary dictionary];
-    
-    NSMutableArray* values = [NSMutableArray array];
-    for (int i = 0; i < HITBOX_COUNT; i++) {
-        [values addObject:@(g_currentValues[i])];
-    }
-    config[@"hitboxes"] = values;
-    config[@"multiplier"] = @(g_globalMultiplier);
-    
-    NSData* json = [NSJSONSerialization dataWithJSONObject:config options:NSJSONWritingPrettyPrinted error:nil];
-    [json writeToFile:path atomically:YES];
-    NSLog(@"[BR] Конфиг сохранён: %@", path);
-}
-
-- (void)loadConfig {
-    NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-    if (paths.count == 0) return;
-    
-    NSString* path = [[paths firstObject] stringByAppendingPathComponent:@"hitbox_config.json"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) return;
-    
-    NSData* json = [NSData dataWithContentsOfFile:path];
-    if (!json) return;
-    
-    NSDictionary* config = [NSJSONSerialization JSONObjectWithData:json options:0 error:nil];
-    if (!config) return;
-    
-    NSArray* values = config[@"hitboxes"];
-    if (values.count == HITBOX_COUNT) {
-        for (int i = 0; i < HITBOX_COUNT; i++) {
-            g_currentValues[i] = [values[i] floatValue];
-        }
-        [MemoryManager writeFloatArray:g_currentValues atAddress:g_hitboxAddress count:HITBOX_COUNT];
-    }
-    
-    g_globalMultiplier = [config[@"multiplier"] floatValue];
-    NSLog(@"[BR] Конфиг загружен: %@", path);
-}
-
-- (void)dealloc {
-    [_displayLink invalidate];
-    ImGui_ImplMetal_Shutdown();
-    ImGui::DestroyContext();
-}
+// Остальные методы (saveConfig, loadConfig, dealloc) без изменений...
 
 @end
 
 // ============================================================================
 // MARK: - Плавающая кнопка
 // ============================================================================
-
-@interface FloatButton : UIButton
-@property (nonatomic, strong) UIPanGestureRecognizer* panGesture;
-@property (nonatomic, strong) UILongPressGestureRecognizer* longPress;
-@end
 
 @implementation FloatButton
 
@@ -517,35 +273,20 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     return self;
 }
 
-- (void)handlePan:(UIPanGestureRecognizer*)gesture {
-    if (gesture.state == UIGestureRecognizerStateChanged) {
-        CGPoint translation = [gesture translationInView:self.superview];
-        CGPoint newCenter = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
-        
-        // Границы
-        CGFloat halfWidth = self.frame.size.width / 2;
-        newCenter.x = MAX(halfWidth, MIN(newCenter.x, self.superview.bounds.size.width - halfWidth));
-        newCenter.y = MAX(halfWidth + 20, MIN(newCenter.y, self.superview.bounds.size.height - halfWidth - 20));
-        
-        self.center = newCenter;
-        [gesture setTranslation:CGPointZero inView:self.superview];
-    }
-}
-
-- (void)handleLongPress:(UILongPressGestureRecognizer*)gesture {
-    if (gesture.state == UIGestureRecognizerStateBegan) {
-        // Можно добавить вибрацию
-    }
-}
-
 - (void)buttonTapped {
     g_menuVisible = !g_menuVisible;
+    // Исправление: обновляем состояние рендерера
+    if (g_renderer) {
+        g_renderer.menuVisible = g_menuVisible;
+    }
     if (g_menuVisible) {
         self.backgroundColor = [UIColor colorWithRed:0.8 green:0.2 blue:0.2 alpha:0.9];
     } else {
         self.backgroundColor = [UIColor colorWithRed:0.2 green:0.4 blue:0.8 alpha:0.9];
     }
 }
+
+// Остальные методы без изменений...
 
 @end
 
@@ -578,12 +319,9 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
         
         // Metal рендерер
         self.renderer = [[MetalRenderer alloc] initWithWindow:self];
+        g_renderer = self.renderer;  // ← Сохраняем глобальную ссылку
     }
     return self;
-}
-
-- (void)dealloc {
-    self.renderer = nil;
 }
 
 @end
@@ -598,11 +336,27 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
 @implementation AppDelegate
 
 - (void)setupOverlay {
+    // Исправление: используем scenes для iOS 15+
     UIWindow* mainWindow = nil;
-    for (UIWindow* window in [UIApplication sharedApplication].windows) {
-        if (window.isKeyWindow) {
-            mainWindow = window;
-            break;
+    if (@available(iOS 15.0, *)) {
+        for (UIScene* scene in [UIApplication sharedApplication].connectedScenes) {
+            if ([scene isKindOfClass:[UIWindowScene class]]) {
+                UIWindowScene* windowScene = (UIWindowScene*)scene;
+                for (UIWindow* window in windowScene.windows) {
+                    if (window.isKeyWindow) {
+                        mainWindow = window;
+                        break;
+                    }
+                }
+            }
+        }
+    } else {
+        // Fallback для старых версий
+        for (UIWindow* window in [UIApplication sharedApplication].windows) {
+            if (window.isKeyWindow) {
+                mainWindow = window;
+                break;
+            }
         }
     }
     
@@ -613,8 +367,8 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
         return;
     }
     
-    // Создаём оверлей
-    CGRect screenBounds = [UIScreen mainScreen].bounds;
+    // Создаём оверлей - используем mainWindow.screen
+    CGRect screenBounds = mainWindow.screen.bounds;
     g_overlayWindow = [[OverlayWindow alloc] initWithFrame:screenBounds];
     g_overlayWindow.hidden = NO;
     g_overlayWindow.alpha = 1.0;
@@ -625,52 +379,6 @@ static dispatch_queue_t g_mainQueue = dispatch_get_main_queue();
     });
 }
 
-- (void)findAddress {
-    // Ждём загрузки игры
-    sleep(5);
-    
-    // Ищем адрес
-    g_hitboxAddress = (float*)[MemoryManager findHitboxAddress];
-    
-    if (g_hitboxAddress) {
-        memcpy(g_currentValues, g_hitboxAddress, sizeof(g_currentValues));
-        memcpy(g_originalValues, g_currentValues, sizeof(g_originalValues));
-        NSLog(@"[BR] ✅ Адрес найден: %p", g_hitboxAddress);
-        
-        // Показываем в UI
-        dispatch_async(dispatch_get_main_queue(), ^{
-            g_menuVisible = true;
-        });
-    } else {
-        NSLog(@"[BR] ❌ Адрес не найден! Используйте ручной ввод.");
-        dispatch_async(dispatch_get_main_queue(), ^{
-            g_menuVisible = true;
-        });
-    }
-}
+// Остальные методы без изменений...
 
 @end
-
-// ============================================================================
-// MARK: - Конструктор библиотеки
-// ============================================================================
-
-__attribute__((constructor))
-static void initLibrary() {
-    NSLog(@"[BR] 🔥 BlackRussia Hitbox Modifier v1.0 загружен");
-    
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        // Создаём делегат
-        AppDelegate* delegate = [AppDelegate new];
-        [delegate setupOverlay];
-        
-        // Удерживаем делегат
-        static AppDelegate* staticDelegate = nil;
-        staticDelegate = delegate;
-    });
-}
-
-__attribute__((destructor))
-static void deinitLibrary() {
-    NSLog(@"[BR] 👋 BlackRussia Hitbox Modifier выгружен");
-}
