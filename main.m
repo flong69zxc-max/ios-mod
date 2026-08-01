@@ -9,16 +9,10 @@
 #import <sys/mman.h>
 #import <dlfcn.h>
 #import <stdarg.h>
+#import <mach/mach.h>
+#import <mach/vm_map.h>
 
-// ============ KittyMemory PORT ============
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-#include <mach/mach.h>
-#include <mach/vm_map.h>
-
-// KittyMemory Core Functions
+// ============ KittyMemory PORT (БЕЗ __clear_cache) ============
 static uintptr_t get_base_address(const char *lib_name) {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
@@ -34,7 +28,6 @@ static uintptr_t find_pattern(const char *lib_name, const char *pattern, const c
     uintptr_t base = get_base_address(lib_name);
     if (!base) return 0;
     
-    // Получаем размер библиотеки
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
@@ -47,21 +40,23 @@ static uintptr_t find_pattern(const char *lib_name, const char *pattern, const c
             for (uint32_t j = 0; j < header->ncmds; j++) {
                 if (cmd->cmd == LC_SEGMENT_64) {
                     struct segment_command_64 *seg = (struct segment_command_64*)cmd;
-                    if (strcmp(seg->segname, "__TEXT") == 0 || strcmp(seg->segname, "__DATA") == 0) {
-                        size += seg->vmsize;
+                    if (strcmp(seg->segname, "__TEXT") == 0) {
+                        size = seg->vmsize;
+                        break;
                     }
                 }
                 cmd = (struct load_command*)((uintptr_t)cmd + cmd->cmdsize);
             }
             
-            // Поиск паттерна
+            if (size == 0) continue;
+            
             size_t pattern_len = strlen(pattern);
             unsigned char *bytes = (unsigned char*)base;
             
             for (uintptr_t i = 0; i < size - pattern_len; i++) {
                 BOOL found = YES;
                 for (size_t j = 0; j < pattern_len; j++) {
-                    if (mask[j] == 'x' && bytes[i + j] != pattern[j]) {
+                    if (mask[j] == 'x' && bytes[i + j] != (unsigned char)pattern[j]) {
                         found = NO;
                         break;
                     }
@@ -78,30 +73,40 @@ static uintptr_t find_pattern(const char *lib_name, const char *pattern, const c
 static BOOL kitty_write_memory(uintptr_t addr, const void *data, size_t size) {
     if (!addr || !data || size == 0) return NO;
     
-    // Изменяем права памяти
+    // Получаем информацию о странице
     vm_address_t page_start = (vm_address_t)addr & ~(vm_page_size - 1);
     vm_size_t page_size = vm_page_size;
     
+    // Сохраняем текущие права
+    vm_prot_t current_prot;
     kern_return_t kr = vm_protect(mach_task_self(), page_start, page_size, FALSE, VM_PROT_READ | VM_PROT_WRITE);
     if (kr != KERN_SUCCESS) {
         return NO;
     }
     
-    // Запись
+    // Запись данных
     memcpy((void*)addr, data, size);
     
-    // Очистка кэша
-    __builtin___clear_cache((char*)addr, (char*)addr + size);
+    // Синхронизация кэша через syscall (альтернатива __clear_cache)
+    // Используем msync для синхронизации
+    msync((void*)addr, size, MS_SYNC);
     
-    // Восстанавливаем права
+    // Для ARM64 используем inline assembly для очистки кэша
+    #if defined(__arm64__) || defined(__aarch64__)
+    __asm__ volatile (
+        "dsb ishst\n"
+        "ic ivau, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        : : "r"(addr) : "memory"
+    );
+    #endif
+    
+    // Восстанавливаем права (READ | EXECUTE для кода)
     vm_protect(mach_task_self(), page_start, page_size, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     
     return YES;
 }
-
-#ifdef __cplusplus
-}
-#endif
 // ============ END KittyMemory ============
 
 #pragma mark - Конфигурация
@@ -137,7 +142,6 @@ static const float ORIGINAL[10] = {0.15f, 0.20f, 0.25f, 0.25f, 0.16f, 0.16f, 0.2
 static const float NEW_VALUES[10] = {0.225f, 0.30f, 0.375f, 0.375f, 0.24f, 0.24f, 0.30f, 0.30f, 0.225f, 0.225f};
 static const char *NAMES[10] = {"HEAD", "TORSO_1", "TORSO_2", "LEGS_1", "LEGS_2", "ARMS_1", "ARMS_2", "CHEST", "STOMACH", "PELVIS"};
 
-// Паттерн для поиска (IDA-style с маской)
 static const char *PATTERN = "\x9A\x99\x19\x3E";
 static const char *MASK = "xxxx";
 
@@ -205,16 +209,14 @@ static void show_alert(const char *title, const char *msg) {
 #pragma mark - Поиск через KittyMemory
 static void* find_hitbox_kitty(long *offset) {
     @autoreleasepool {
-        log_to_file("🔍 Поиск хитбоксов через KittyMemory...");
+        log_to_file("🔍 Поиск хитбоксов...");
         
-        // Пробуем разные названия библиотек
         const char *libs[] = {"blackrussia-client", "BrBase", "BlackRussia", "client"};
         for (int i = 0; i < 4; i++) {
             uintptr_t addr = find_pattern(libs[i], PATTERN, MASK);
             if (addr) {
                 log_to_file("✅ Найдено в %s по адресу %p", libs[i], (void*)addr);
                 
-                // Валидация
                 HitboxValues *hb = (HitboxValues*)addr;
                 float vals[10] = {
                     hb->head, hb->torso_1, hb->torso_2,
@@ -227,7 +229,7 @@ static void* find_hitbox_kitty(long *offset) {
                     if (fabs(vals[j] - ORIGINAL[j]) < 0.001f) match++;
                 }
                 
-                if (match >= 8) { // 8/10 совпадений достаточно
+                if (match >= 8) {
                     log_to_file("✅ Валидация пройдена (%d/10)", match);
                     *offset = addr - (uintptr_t)get_base_address(libs[i]);
                     return (void*)addr;
@@ -251,7 +253,7 @@ static BOOL apply_patch() {
         void *addr = find_hitbox_kitty(&offset);
         
         if (!addr) {
-            log_to_file("❌ Патч невозможен - хитбоксы не найдены");
+            log_to_file("❌ Патч невозможен");
             return NO;
         }
         
@@ -281,7 +283,7 @@ static BOOL apply_patch() {
             log_to_file("  %s: %.3f", NAMES[i], old[i]);
         }
         
-        // Подготовка новых значений
+        // Новые значения
         HitboxValues new_hb = *hb;
         new_hb.head = NEW_VALUES[0];
         new_hb.torso_1 = NEW_VALUES[1];
@@ -294,9 +296,9 @@ static BOOL apply_patch() {
         new_hb.stomach = NEW_VALUES[8];
         new_hb.pelvis = NEW_VALUES[9];
         
-        // Запись через KittyMemory
+        // Запись
         if (!kitty_write_memory((uintptr_t)addr, &new_hb, sizeof(HitboxValues))) {
-            log_to_file("❌ Ошибка записи в память");
+            log_to_file("❌ Ошибка записи");
             memcpy(hb, &backup, sizeof(HitboxValues));
             return NO;
         }
@@ -324,7 +326,7 @@ static BOOL apply_patch() {
         }
         
         if (!success) {
-            log_to_file("❌ Патч провалился - восстанавливаем бэкап");
+            log_to_file("❌ Патч провалился - восстановление");
             memcpy(hb, &backup, sizeof(HitboxValues));
             return NO;
         }
@@ -334,7 +336,6 @@ static BOOL apply_patch() {
             log_to_file("  %s: %.3f ✅", NAMES[i], NEW_VALUES[i]);
         }
         
-        // UI сообщение
         char msg[2048];
         snprintf(msg, sizeof(msg),
                  "✅ ПАТЧ ПРИМЕНЁН УСПЕШНО\n"
