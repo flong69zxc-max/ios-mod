@@ -51,9 +51,16 @@ static const unsigned char SIGNATURES[][4] = {
 };
 static const int SIGNATURE_COUNT = sizeof(SIGNATURES) / sizeof(SIGNATURES[0]);
 
-#pragma mark - Логгер
-static void log_to_file(const char *msg) {
+#pragma mark - Логгер с поддержкой форматирования
+static void log_to_file(const char *format, ...) {
     @autoreleasepool {
+        va_list args;
+        va_start(args, format);
+        
+        char buffer[4096];
+        vsnprintf(buffer, sizeof(buffer), format, args);
+        va_end(args);
+        
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *doc = [paths firstObject];
         NSString *logPath = [doc stringByAppendingPathComponent:LOG_FILE];
@@ -65,7 +72,7 @@ static void log_to_file(const char *msg) {
         struct tm *tm = localtime(&t);
         char ts[20];
         strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
-        fprintf(f, "[%s] %s\n", ts, msg);
+        fprintf(f, "[%s] %s\n", ts, buffer);
         fclose(f);
     }
 }
@@ -81,17 +88,36 @@ static void show_alert(const char *title, const char *msg, BOOL is_error) {
             
             [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
             
-            UIViewController *root = [UIApplication sharedApplication].keyWindow.rootViewController;
-            if (!root) {
-                // Fallback для iOS 13+
+            UIViewController *root = nil;
+            
+            // iOS 13+ совместимый способ получения root VC
+            if (@available(iOS 13.0, *)) {
                 for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
                     if ([scene isKindOfClass:[UIWindowScene class]]) {
                         for (UIWindow *w in scene.windows) {
-                            if (w.rootViewController) {
+                            if (w.isKeyWindow && w.rootViewController) {
                                 root = w.rootViewController;
                                 break;
                             }
                         }
+                    }
+                }
+            }
+            
+            // Fallback для старых iOS
+            if (!root) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                root = [UIApplication sharedApplication].keyWindow.rootViewController;
+                #pragma clang diagnostic pop
+            }
+            
+            if (!root) {
+                // Последний fallback - берем любой window с root VC
+                for (UIWindow *w in [UIApplication sharedApplication].windows) {
+                    if (w.rootViewController) {
+                        root = w.rootViewController;
+                        break;
                     }
                 }
             }
@@ -191,7 +217,7 @@ static void* find_hitbox(long *offset, int *sig_index) {
                     if (valid) {
                         *offset = pos;
                         *sig_index = sig;
-                        log_to_file("✅ Найдена сигнатура #3");
+                        log_to_file("✅ Найдена сигнатура #%d", sig);
                         return start + pos;
                     }
                 }
