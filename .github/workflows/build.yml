@@ -15,7 +15,7 @@ jobs:
 
       - name: Compile to dylib (arm64 iOS)
         run: |
-          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit -o mylib.dylib main.m
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib -framework Foundation -framework UIKit -o mylib.dylib main.mm
 
       - name: Upload built dylib
         uses: actions/upload-artifact@v4
