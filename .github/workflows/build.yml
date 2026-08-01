@@ -12,113 +12,60 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive  # Если ImGui как submodule
 
-      - name: Download ImGui (if not submodule)
+      - name: Download ImGui
         run: |
-          if [ ! -d "imgui" ]; then
-            echo "📥 Downloading ImGui..."
-            git clone --depth 1 https://github.com/ocornut/imgui.git
-          else
-            echo "✅ ImGui already exists"
-          fi
-
-      - name: Find all ImGui source files
-        id: imgui_files
-        run: |
-          # Собираем все .cpp файлы ImGui
-          IMGUI_CPP=$(find imgui -maxdepth 1 -name "*.cpp" | tr '\n' ' ')
-          IMGUI_BACKEND=$(find imgui/backends -name "*.cpp" -o -name "*.mm" | grep -E "(imgui_impl_metal|imgui_impl_ios)" | tr '\n' ' ')
-          echo "IMGUI_CPP=$IMGUI_CPP" >> $GITHUB_ENV
-          echo "IMGUI_BACKEND=$IMGUI_BACKEND" >> $GITHUB_ENV
-          echo "📄 Found ImGui sources: $IMGUI_CPP $IMGUI_BACKEND"
+          git clone --depth 1 https://github.com/ocornut/imgui.git
+          # Исправление: скачиваем правильную версию ImGui
+          cd imgui && git checkout v1.90.6
 
       - name: Compile to dylib (arm64 iOS)
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "🔧 Using SDK: $SDK_PATH"
           
-          # Основные фреймворки
-          FRAMEWORKS="-framework UIKit -framework Metal -framework MetalKit -framework Foundation -framework CoreGraphics -framework QuartzCore -framework CoreMedia -framework IOKit -framework IOSurface -framework CoreVideo -framework OpenGLES"
-          
-          # Флаги компиляции
-          CFLAGS="-std=c++17 -O2 -fobjc-arc"
-          
-          # Компиляция
+          # Исправление: добавляем -DIMGUI_IMPL_METAL_CPP
           xcrun -sdk iphoneos clang++ \
             -arch arm64 \
-            -arch arm64e \
-            $CFLAGS \
+            -std=c++17 \
+            -O2 \
+            -fobjc-arc \
+            -DIMGUI_IMPL_METAL_CPP \
             -dynamiclib \
             -isysroot $SDK_PATH \
             -I./imgui \
             -I./imgui/backends \
-            $FRAMEWORKS \
+            -framework UIKit \
+            -framework Metal \
+            -framework MetalKit \
+            -framework Foundation \
+            -framework CoreGraphics \
+            -framework QuartzCore \
+            -framework CoreMedia \
+            -framework IOKit \
+            -framework IOSurface \
+            -framework CoreVideo \
+            -framework OpenGLES \
             -lc++ \
             main.mm \
-            ${{ env.IMGUI_CPP }} \
-            ${{ env.IMGUI_BACKEND }} \
+            imgui/imgui.cpp \
+            imgui/imgui_draw.cpp \
+            imgui/imgui_widgets.cpp \
+            imgui/imgui_tables.cpp \
+            imgui/backends/imgui_impl_metal.mm \
             -o BlackRussiaHitbox.dylib
           
           echo "✅ Compiled successfully!"
-
-      - name: Sign dylib (for debugging)
-        run: |
-          brew install ldid 2>/dev/null || echo "ldid already installed"
-          ldid -S BlackRussiaHitbox.dylib || echo "⚠️ Signing failed, but continuing"
-          echo "✅ Signed"
 
       - name: Verify dylib
         run: |
           file BlackRussiaHitbox.dylib
           otool -L BlackRussiaHitbox.dylib | head -20
           ls -lh BlackRussiaHitbox.dylib
-          echo "📦 Size: $(du -h BlackRussiaHitbox.dylib | cut -f1)"
 
       - name: Upload built dylib
         uses: actions/upload-artifact@v4
         with:
           name: BlackRussiaHitbox
           path: BlackRussiaHitbox.dylib
-          retention-days: 90
-
-      - name: Create .deb package (for Theos)
-        run: |
-          mkdir -p package/DEBIAN
-          mkdir -p package/Library/MobileSubstrate/DynamicLibraries
-          
-          cp BlackRussiaHitbox.dylib package/Library/MobileSubstrate/DynamicLibraries/
-          
-          cat > package/Library/MobileSubstrate/DynamicLibraries/BlackRussiaHitbox.plist << 'EOF'
-          {
-            Filter = {
-              Executables = ("blackrussia-client");
-            };
-          }
-          EOF
-          
-          cat > package/DEBIAN/control << 'EOF'
-          Package: com.yourname.blackrussiahitbox
-          Name: BlackRussia Hitbox
-          Version: 1.0.0
-          Architecture: iphoneos-arm64
-          Description: Hitbox modifier for Black Russia
-          Maintainer: Your Name <email@example.com>
-          Author: Your Name <email@example.com>
-          Section: Tweaks
-          Depends: mobilesubstrate
-          EOF
-          
-          dpkg-deb -b package BlackRussiaHitbox.deb 2>/dev/null || echo "⚠️ dpkg-deb not found, skipping .deb"
-          
-          if [ -f "BlackRussiaHitbox.deb" ]; then
-            echo "✅ .deb package created"
-          fi
-
-      - name: Upload .deb package
-        uses: actions/upload-artifact@v4
-        with:
-          name: BlackRussiaHitbox-deb
-          path: BlackRussiaHitbox.deb
           retention-days: 90
