@@ -1,7 +1,4 @@
-// main.mm - Black Russia Hitbox Patcher - C++ VERSION
-// ✅ РАБОТАЕТ ТОЛЬКО С АБСОЛЮТНЫМИ АДРЕСАМИ
-// ✅ ДИНАМИЧЕСКИЙ ПОИСК
-// ✅ ПРАВИЛЬНЫЙ РАСЧЕТ ОТНОСИТЕЛЬНОГО И АБСОЛЮТНОГО АДРЕСОВ
+// main.mm - Black Russia Hitbox Patcher (ARM64)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -11,13 +8,9 @@
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <mach-o/getsect.h>
-#import <mach-o/nlist.h>
-#include <mutex>
-#include <vector>
+#import <mutex>
+#import <vector>
 
-// ============================================================
-// 1. Hitbox структура с float значениями
-// ============================================================
 typedef struct {
     const char *name;
     uint32_t original;
@@ -43,34 +36,21 @@ static const HitboxValue gHitboxes[] = {
 #define STEP_SIZE 0x20
 #define TOLERANCE 0.005f
 
-// ============================================================
-// 2. Глобальные переменные с защитой
-// ============================================================
 static vm_address_t gFrameworkBase = 0;
-static const char *gFrameworkPath = NULL;
 static bool gPatched = false;
 static std::mutex gPatchMutex;
 static mach_port_t gTask = MACH_PORT_NULL;
-
-// Абсолютный адрес найденных хитбоксов
 static vm_address_t gHitboxesAbsoluteAddr = 0;
-// Относительный адрес (RVA) - вычисляется как абсолютный - база
 static vm_address_t gHitboxesRelativeAddr = 0;
 
-// ============================================================
-// 3. Структура для секций памяти
-// ============================================================
 typedef struct {
-    vm_address_t absolute;    // Абсолютный адрес в памяти
+    vm_address_t absolute;
     vm_size_t size;
     const char *name;
 } MemorySection;
 
 static std::vector<MemorySection> gSections;
 
-// ============================================================
-// 4. Logging с синхронизацией
-// ============================================================
 static void write_log(NSString *format, ...) {
     static std::mutex logMutex;
     std::lock_guard<std::mutex> lock(logMutex);
@@ -111,9 +91,6 @@ static void write_log(NSString *format, ...) {
     }
 }
 
-// ============================================================
-// 5. Показ уведомлений
-// ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIWindow *window = nil;
@@ -171,9 +148,6 @@ static void show_notification(NSString *title, NSString *subtitle) {
     });
 }
 
-// ============================================================
-// 6. Memory helpers с проверкой
-// ============================================================
 static bool read_memory_safe(vm_address_t absoluteAddr, void *buffer, size_t size) {
     if (absoluteAddr == 0 || buffer == NULL || size == 0) return false;
     
@@ -186,28 +160,21 @@ static bool read_memory_safe(vm_address_t absoluteAddr, void *buffer, size_t siz
 static bool write_memory_safe(vm_address_t absoluteAddr, const void *buffer, size_t size) {
     if (absoluteAddr == 0 || buffer == NULL || size == 0) return false;
     
-    // Проверка на защиту памяти
     vm_prot_t prot = VM_PROT_READ | VM_PROT_WRITE;
-    kern_return_t kr = vm_protect(gTask, absoluteAddr, size, false, prot);
-    if (kr != KERN_SUCCESS) {
-        write_log(@"⚠️ Не удалось снять защиту: %d", kr);
-    }
+    vm_protect(gTask, absoluteAddr, size, false, prot);
     
-    kr = vm_write(gTask, absoluteAddr, (vm_offset_t)buffer, size);
+    kern_return_t kr = vm_write(gTask, absoluteAddr, (vm_offset_t)buffer, size);
     return (kr == KERN_SUCCESS);
 }
 
-// ============================================================
-// 7. Поиск blackrussia-client.framework
-// ============================================================
 static vm_address_t find_blackrussia_framework(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║     🔍 ПОИСК blackrussia-client.framework                ║");
+    write_log(@"║     SEARCHING blackrussia-client.framework               ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     
     uint32_t imageCount = _dyld_image_count();
-    write_log(@"📊 Загружено образов: %d", imageCount);
+    write_log(@"Total images: %d", imageCount);
     
     for (uint32_t i = 0; i < imageCount; i++) {
         const char *name = _dyld_get_image_name(i);
@@ -220,19 +187,11 @@ static vm_address_t find_blackrussia_framework(void) {
             
             intptr_t slide = _dyld_get_image_vmaddr_slide(i);
             gFrameworkBase = (vm_address_t)header + slide;
-            gFrameworkPath = name;
             
             write_log(@"");
-            write_log(@"✅ НАЙДЕН!");
-            write_log(@"  ┌─────────────────────────────────────────────");
-            write_log(@"  │ Index: %d", i);
-            write_log(@"  │ Path: %s", name);
-            write_log(@"  │ Абсолютный адрес заголовка: 0x%llX", (unsigned long long)header);
-            write_log(@"  │ Slide: 0x%lX", (unsigned long)slide);
-            write_log(@"  │ Базовый адрес (ASLR):  0x%llX", (unsigned long long)gFrameworkBase);
-            write_log(@"  └─────────────────────────────────────────────");
+            write_log(@"FOUND!");
+            write_log(@"  Base address: 0x%llX", (unsigned long long)gFrameworkBase);
             
-            // Сканируем секции
             gSections.clear();
             uint64_t size = 0;
             
@@ -242,54 +201,46 @@ static vm_address_t find_blackrussia_framework(void) {
             if (data && size > 0) {
                 MemorySection sect = {(vm_address_t)data + slide, size, "__DATA.__data"};
                 gSections.push_back(sect);
-                write_log(@"  📁 %s: 0x%llX (абсолютный)", sect.name, (unsigned long long)sect.absolute);
             }
             
             data = getsectdatafromheader_64(header, "__DATA", "__const", &size);
             if (data && size > 0) {
                 MemorySection sect = {(vm_address_t)data + slide, size, "__DATA.__const"};
                 gSections.push_back(sect);
-                write_log(@"  📁 %s: 0x%llX (абсолютный)", sect.name, (unsigned long long)sect.absolute);
             }
             
             data = getsectdatafromheader_64(header, "__DATA_CONST", "__const", &size);
             if (data && size > 0) {
                 MemorySection sect = {(vm_address_t)data + slide, size, "__DATA_CONST.__const"};
                 gSections.push_back(sect);
-                write_log(@"  📁 %s: 0x%llX (абсолютный)", sect.name, (unsigned long long)sect.absolute);
             }
             
             data = getsectdatafromheader_64(header, "__DATA", "__bss", &size);
             if (data && size > 0) {
                 MemorySection sect = {(vm_address_t)data + slide, size, "__DATA.__bss"};
                 gSections.push_back(sect);
-                write_log(@"  📁 %s: 0x%llX (абсолютный)", sect.name, (unsigned long long)sect.absolute);
             }
 #pragma clang diagnostic pop
             
             write_log(@"");
-            write_log(@"📊 Всего секций: %zu", gSections.size());
+            write_log(@"Sections found: %zu", gSections.size());
             
             return gFrameworkBase;
         }
     }
     
-    write_log(@"❌ blackrussia-client НЕ НАЙДЕН!");
+    write_log(@"blackrussia-client NOT FOUND!");
     return 0;
 }
 
-// ============================================================
-// 8. Быстрый поиск хитбоксов в абсолютных адресах
-// ============================================================
 static vm_address_t find_hitboxes_absolute(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║     🎯 ДИНАМИЧЕСКИЙ ПОИСК ХИТБОКСОВ                     ║");
-    write_log(@"║     Сканируем АБСОЛЮТНЫЕ адреса в памяти                ║");
+    write_log(@"║     SEARCHING HITBOXES IN ABSOLUTE ADDRESSES            ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
-    write_log(@"🔍 Ищем паттерн (10 значений, шаг 0x%X):", STEP_SIZE);
+    write_log(@"Pattern: %d values, step 0x%X", HITBOX_COUNT, STEP_SIZE);
     for (int i = 0; i < HITBOX_COUNT; i++) {
         write_log(@"  +0x%03X: %s = %.3f (0x%08X)", 
                  i * STEP_SIZE, 
@@ -300,7 +251,6 @@ static vm_address_t find_hitboxes_absolute(void) {
     write_log(@"");
     
     size_t totalScanned = 0;
-    size_t totalCandidates = 0;
     
     for (const auto& sect : gSections) {
         vm_address_t startAbsolute = sect.absolute;
@@ -309,13 +259,12 @@ static vm_address_t find_hitboxes_absolute(void) {
         if (size < HITBOX_COUNT * STEP_SIZE) continue;
         
         write_log(@"");
-        write_log(@"🔎 Сканируем %s (0x%llX байт)", sect.name, (unsigned long long)size);
-        write_log(@"   Абсолютный адрес начала: 0x%llX", (unsigned long long)startAbsolute);
+        write_log(@"Scanning %s (0x%llX bytes)", sect.name, (unsigned long long)size);
+        write_log(@"  Start absolute: 0x%llX", (unsigned long long)startAbsolute);
         
         size_t scanned = 0;
         size_t candidates = 0;
         
-        // Оптимизация: используем поиск с шагом 4 байта
         for (vm_address_t addr = startAbsolute; 
              addr <= startAbsolute + size - (HITBOX_COUNT * STEP_SIZE); 
              addr += 4) {
@@ -323,17 +272,14 @@ static vm_address_t find_hitboxes_absolute(void) {
             scanned++;
             totalScanned++;
             
-            // Прогресс каждые 100k итераций
             if (scanned % 100000 == 0) {
-                write_log(@"  📊 Сканировано %zu позиций в %s", scanned, sect.name);
+                write_log(@"  Scanned %zu positions in %s", scanned, sect.name);
             }
             
-            // Быстрая проверка первого значения
             uint32_t headVal = 0;
             if (!read_memory_safe(addr, &headVal, 4)) continue;
             if (headVal != gHitboxes[0].original) continue;
             
-            // Проверяем остальные значения
             bool allMatch = true;
             int matched = 0;
             
@@ -358,114 +304,105 @@ static vm_address_t find_hitboxes_absolute(void) {
             
             if (allMatch && matched == HITBOX_COUNT) {
                 candidates++;
-                totalCandidates++;
                 
-                // ✅ Сохраняем АБСОЛЮТНЫЙ адрес (реальный адрес в памяти)
                 gHitboxesAbsoluteAddr = addr;
-                
-                // ✅ Вычисляем ОТНОСИТЕЛЬНЫЙ адрес (RVA) = абсолютный - база
                 gHitboxesRelativeAddr = addr - gFrameworkBase;
                 
+                uint64_t relativeDisplay = (uint64_t)(gHitboxesRelativeAddr & 0xFFFFFFFFFFFFFFFF);
+                uint64_t absoluteDisplay = (uint64_t)addr;
+                uint64_t baseDisplay = (uint64_t)gFrameworkBase;
+                
                 write_log(@"");
-                write_log(@"🎯 НАЙДЕН КАНДИДАТ #%zu!", candidates);
-                write_log(@"  ┌─────────────────────────────────────────────");
-                write_log(@"  │ АБСОЛЮТНЫЙ адрес: 0x%llX", (unsigned long long)addr);
-                write_log(@"  │ Базовый адрес:    0x%llX", (unsigned long long)gFrameworkBase);
-                write_log(@"  │ ОТНОСИТЕЛЬНЫЙ:    0x%llX (абсолютный - база)", 
-                         (unsigned long long)gHitboxesRelativeAddr);
-                write_log(@"  │ Секция: %s", sect.name);
-                write_log(@"  └─────────────────────────────────────────────");
+                write_log(@"FOUND candidate #%zu!", candidates);
+                write_log(@"  ABSOLUTE address: 0x%llX", absoluteDisplay);
+                write_log(@"  Base address:     0x%llX", baseDisplay);
+                write_log(@"  RELATIVE (RVA):   0x%llX", relativeDisplay);
+                write_log(@"  Section: %s", sect.name);
                 write_log(@"");
-                write_log(@"📋 Проверка значений:");
+                write_log(@"Verified values:");
                 
                 for (int i = 0; i < HITBOX_COUNT; i++) {
                     vm_address_t checkAddr = addr + i * STEP_SIZE;
                     uint32_t val = 0;
                     read_memory_safe(checkAddr, &val, 4);
                     float actual = *(float*)&val;
-                    write_log(@"  +0x%03X %s: 0x%08X = %.3f ✓", 
+                    write_log(@"  +0x%03X %s: 0x%08X = %.3f", 
                              i * STEP_SIZE, gHitboxes[i].name, val, actual);
                 }
                 
                 write_log(@"");
                 write_log(@"╔═══════════════════════════════════════════════════════════╗");
-                write_log(@"║     ✅ ВСЕ %d ХИТБОКСОВ НАЙДЕНЫ!                        ║", HITBOX_COUNT);
-                write_log(@"║     АБСОЛЮТНЫЙ адрес: 0x%llX                           ║", (unsigned long long)gHitboxesAbsoluteAddr);
-                write_log(@"║     ОТНОСИТЕЛЬНЫЙ (RVA): 0x%llX                        ║", (unsigned long long)gHitboxesRelativeAddr);
-                write_log(@"║     Формула: 0x%llX - 0x%llX = 0x%llX                  ║", 
-                         (unsigned long long)gHitboxesAbsoluteAddr,
-                         (unsigned long long)gFrameworkBase,
-                         (unsigned long long)gHitboxesRelativeAddr);
+                write_log(@"║     ALL %d HITBOXES FOUND!                              ║", HITBOX_COUNT);
+                write_log(@"║     ABSOLUTE: 0x%llX                                    ║", absoluteDisplay);
+                write_log(@"║     RELATIVE: 0x%llX                                    ║", relativeDisplay);
+                write_log(@"║     Formula: 0x%llX - 0x%llX = 0x%llX                   ║", 
+                         absoluteDisplay, baseDisplay, relativeDisplay);
                 write_log(@"╚═══════════════════════════════════════════════════════════╝");
                 
-                return addr; // Возвращаем АБСОЛЮТНЫЙ адрес
+                return addr;
             }
         }
         
-        write_log(@"  📊 Сканировано %zu позиций, кандидатов: %zu", scanned, candidates);
+        write_log(@"  Scanned %zu positions, candidates: %zu", scanned, candidates);
     }
     
     write_log(@"");
-    write_log(@"❌ Хитбоксы НЕ НАЙДЕНЫ!");
-    write_log(@"📊 Всего сканировано: %zu позиций", totalScanned);
+    write_log(@"Hitboxes NOT found!");
+    write_log(@"Total scanned: %zu positions", totalScanned);
     return 0;
 }
 
-// ============================================================
-// 9. Патчинг хитбоксов (работаем с АБСОЛЮТНЫМИ адресами)
-// ============================================================
 static bool patch_hitboxes_absolute(vm_address_t absoluteAddr) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║     💉 ПРИМЕНЕНИЕ ПАТЧЕЙ (x2)                           ║");
-    write_log(@"║     Работаем с АБСОЛЮТНЫМИ адресами                     ║");
+    write_log(@"║     APPLYING PATCHES (x2)                                ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
     if (absoluteAddr == 0) {
-        write_log(@"❌ Некорректный абсолютный адрес!");
+        write_log(@"Invalid absolute address!");
         return false;
     }
     
-    write_log(@"📍 Абсолютный адрес начала: 0x%llX", (unsigned long long)absoluteAddr);
-    write_log(@"📍 Базовый адрес:           0x%llX", (unsigned long long)gFrameworkBase);
-    write_log(@"📍 Относительный (RVA):     0x%llX", (unsigned long long)gHitboxesRelativeAddr);
+    uint64_t absoluteDisplay = (uint64_t)absoluteAddr;
+    uint64_t baseDisplay = (uint64_t)gFrameworkBase;
+    uint64_t relativeDisplay = (uint64_t)(gHitboxesRelativeAddr & 0xFFFFFFFFFFFFFFFF);
+    
+    write_log(@"  Absolute start: 0x%llX", absoluteDisplay);
+    write_log(@"  Base address:   0x%llX", baseDisplay);
+    write_log(@"  Relative (RVA): 0x%llX", relativeDisplay);
     write_log(@"");
     
     bool allSuccess = true;
     
     for (int i = 0; i < HITBOX_COUNT; i++) {
-        // ✅ Используем АБСОЛЮТНЫЙ адрес для записи
         vm_address_t patchAddr = absoluteAddr + i * STEP_SIZE;
         uint32_t newValue = gHitboxes[i].patched;
         float newFloat = *(float*)&newValue;
         
-        // Читаем оригинальное значение
         uint32_t originalValue = 0;
         read_memory_safe(patchAddr, &originalValue, 4);
         float originalFloat = *(float*)&originalValue;
         
-        write_log(@"📝 %s:", gHitboxes[i].name);
-        write_log(@"  Абсолютный адрес: 0x%llX", (unsigned long long)patchAddr);
-        write_log(@"  Оригинал: 0x%08X (%.3f)", originalValue, originalFloat);
-        write_log(@"  Патч:     0x%08X (%.3f) ×2", newValue, newFloat);
+        write_log(@"%s:", gHitboxes[i].name);
+        write_log(@"  Address:  0x%llX", (unsigned long long)patchAddr);
+        write_log(@"  Original: 0x%08X (%.3f)", originalValue, originalFloat);
+        write_log(@"  New:      0x%08X (%.3f) x2", newValue, newFloat);
         
-        // Записываем новое значение
         if (!write_memory_safe(patchAddr, &newValue, 4)) {
             allSuccess = false;
-            write_log(@"  ❌ ОШИБКА ЗАПИСИ!");
+            write_log(@"  WRITE FAILED!");
             break;
         }
         
-        // Верифицируем
         uint32_t verifyValue = 0;
         read_memory_safe(patchAddr, &verifyValue, 4);
         
         if (verifyValue == newValue) {
-            write_log(@"  ✅ ВЕРИФИЦИРОВАНО");
+            write_log(@"  VERIFIED");
         } else {
             allSuccess = false;
-            write_log(@"  ❌ ВЕРИФИКАЦИЯ НЕ УДАЛАСЬ!");
+            write_log(@"  VERIFY FAILED!");
             break;
         }
         write_log(@"");
@@ -474,94 +411,79 @@ static bool patch_hitboxes_absolute(vm_address_t absoluteAddr) {
     return allSuccess;
 }
 
-// ============================================================
-// 10. Основная функция патчинга
-// ============================================================
 static void patch_hitboxes(void) {
     std::lock_guard<std::mutex> lock(gPatchMutex);
     
     if (gPatched) {
-        write_log(@"⚠️ Патч уже применен!");
+        write_log(@"Patch already applied!");
         return;
     }
     
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║     🚀 BLACK RUSSIA HITBOX PATCHER v13.0                ║");
-    write_log(@"║     ✅ ТОЛЬКО АБСОЛЮТНЫЕ АДРЕСА                         ║");
-    write_log(@"║     ✅ ДИНАМИЧЕСКИЙ ПОИСК                                ║");
-    write_log(@"║     ✅ ПРАВИЛЬНЫЙ РАСЧЕТ RVA                            ║");
+    write_log(@"║     BLACK RUSSIA HITBOX PATCHER v13.0                   ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
     gTask = mach_task_self();
-    write_log(@"🔑 Task port: %d", gTask);
+    write_log(@"Task port: %d", gTask);
     
-    // 1. Находим фреймворк и получаем БАЗОВЫЙ адрес
     if (!find_blackrussia_framework() || gFrameworkBase == 0) {
-        write_log(@"❌ Не удалось найти blackrussia-client.framework");
-        show_notification(@"Ошибка", @"Фреймворк не найден");
+        write_log(@"Failed to find blackrussia-client.framework");
+        show_notification(@"Error", @"Framework not found");
         return;
     }
     
-    // 2. Динамически ищем хитбоксы (сканируем АБСОЛЮТНЫЕ адреса)
     vm_address_t foundAbsolute = find_hitboxes_absolute();
     if (!foundAbsolute) {
-        write_log(@"❌ Хитбоксы не найдены!");
-        show_notification(@"Ошибка", @"Хитбоксы не найдены");
+        write_log(@"Hitboxes not found!");
+        show_notification(@"Error", @"Hitboxes not found");
         return;
     }
     
-    // 3. Применяем патчи (используем АБСОЛЮТНЫЙ адрес)
     bool success = patch_hitboxes_absolute(foundAbsolute);
     
     if (success) {
         gPatched = true;
         
+        uint64_t absoluteDisplay = (uint64_t)gHitboxesAbsoluteAddr;
+        uint64_t baseDisplay = (uint64_t)gFrameworkBase;
+        uint64_t relativeDisplay = (uint64_t)(gHitboxesRelativeAddr & 0xFFFFFFFFFFFFFFFF);
+        
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
-        write_log(@"║     ✅ ВСЕ 10 ХИТБОКСОВ УСПЕШНО ЗАПАТЧЕНЫ!              ║");
+        write_log(@"║     ALL 10 HITBOXES PATCHED!                            ║");
         write_log(@"║                                                          ║");
-        write_log(@"║     📍 АБСОЛЮТНЫЙ адрес: 0x%llX                       ║", (unsigned long long)gHitboxesAbsoluteAddr);
-        write_log(@"║     📍 Базовый адрес:    0x%llX                       ║", (unsigned long long)gFrameworkBase);
-        write_log(@"║     📍 ОТНОСИТЕЛЬНЫЙ:    0x%llX                       ║", (unsigned long long)gHitboxesRelativeAddr);
+        write_log(@"║     ABSOLUTE: 0x%llX                                    ║", absoluteDisplay);
+        write_log(@"║     Base:     0x%llX                                    ║", baseDisplay);
+        write_log(@"║     RELATIVE: 0x%llX                                    ║", relativeDisplay);
         write_log(@"║                                                          ║");
-        write_log(@"║     Формула: 0x%llX - 0x%llX = 0x%llX                  ║", 
-                 (unsigned long long)gHitboxesAbsoluteAddr,
-                 (unsigned long long)gFrameworkBase,
-                 (unsigned long long)gHitboxesRelativeAddr);
+        write_log(@"║     Formula: 0x%llX - 0x%llX = 0x%llX                   ║", 
+                 absoluteDisplay, baseDisplay, relativeDisplay);
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
         
         NSString *msg = [NSString stringWithFormat:
-            @"Абсолютный: 0x%llX\n"
-            @"Относительный: 0x%llX\n"
-            @"x2 Hitboxes активны!",
-            (unsigned long long)gHitboxesAbsoluteAddr,
-            (unsigned long long)gHitboxesRelativeAddr];
-        show_notification(@"✅ Патч успешно применен!", msg);
+            @"Absolute: 0x%llX\n"
+            @"Relative: 0x%llX\n"
+            @"x2 Hitboxes active!",
+            absoluteDisplay, relativeDisplay];
+        show_notification(@"Patch applied successfully!", msg);
         
     } else {
         write_log(@"");
-        write_log(@"╔═══════════════════════════════════════════════════════════╗");
-        write_log(@"║              ❌ ПАТЧ НЕ УДАЛСЯ!                          ║");
-        write_log(@"╚═══════════════════════════════════════════════════════════╝");
-        show_notification(@"❌ Ошибка", @"Патч не удался. Проверьте логи.");
+        write_log(@"PATCH FAILED!");
+        show_notification(@"Error", @"Patch failed. Check logs.");
     }
 }
 
-// ============================================================
-// 11. Точка входа
-// ============================================================
 __attribute__((constructor))
 static void initialize(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║     🔥 HITBOX PATCHER INJECTED v13.0                     ║");
-    write_log(@"║     ✅ Работает только с абсолютными адресами            ║");
-    write_log(@"║     ✅ Динамический поиск в памяти                       ║");
+    write_log(@"║     HITBOX PATCHER INJECTED v13.0                       ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
-    write_log(@"⏳ Ожидаем 5 секунд для загрузки игры...");
+    write_log(@"Waiting 5 seconds for game to load...");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
@@ -569,15 +491,4 @@ static void initialize(void) {
     });
 }
 
-// ============================================================
-// 12. Dummy export
-// ============================================================
 extern "C" void __dummy_export(void) {}
-
-// ============================================================
-// Компиляция:
-// xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
-//   -framework Foundation -framework UIKit \
-//   -stdlib=libc++ -std=c++17 -O3 \
-//   -o hitbox_patcher.dylib main.mm
-// ============================================================
