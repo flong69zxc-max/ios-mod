@@ -1,41 +1,49 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Scans ALL memory regions for hitbox data
+// Correct pattern search with 0x20 spacing
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
 
 // ============================================================
-// 1. Original hitbox float values (little-endian hex)
+// 1. Original hitbox values (little-endian hex)
+// STRUCTURE: each value is 4 bytes, followed by 28 bytes of zeros/garbage
+// Total spacing = 32 bytes (0x20) between values
 // ============================================================
 typedef struct {
     const char *name;
-    uint32_t original[4];
-    uint32_t patched[4];
-    size_t len;
-} HitboxPattern;
+    uint32_t original;
+    uint32_t patched;
+} HitboxValue;
 
-static HitboxPattern gPatterns[] = {
-    {"HEAD",        {0x3E19999A}, {0x3E666666}, 1},
-    {"TORSO_1",     {0x3E4CCCCD}, {0x3E99999A}, 1},
-    {"TORSO_2",     {0x3E800000}, {0x3EC00000}, 1},
-    {"MID",         {0x3E800000}, {0x3EC00000}, 1},
-    {"LEFTARM",     {0x3E24E148}, {0x3E74E148}, 1},
-    {"RIGHTARM",    {0x3E24E148}, {0x3E74E148}, 1},
-    {"LEFTLEG_1",   {0x3E4CCCCD}, {0x3E99999A}, 1},
-    {"RIGHTLEG_1",  {0x3E4CCCCD}, {0x3E99999A}, 1},
-    {"LEFTLEG_2",   {0x3E19999A}, {0x3E666666}, 1},
-    {"RIGHTLEG_2",  {0x3E19999A}, {0x3E666666}, 1}
+static HitboxValue gHitboxes[] = {
+    {"HEAD",        0x3E19999A, 0x3E666666},
+    {"TORSO_1",     0x3E4CCCCD, 0x3E99999A},
+    {"TORSO_2",     0x3E800000, 0x3EC00000},
+    {"MID",         0x3E800000, 0x3EC00000},
+    {"LEFTARM",     0x3E24E148, 0x3E74E148},
+    {"RIGHTARM",    0x3E24E148, 0x3E74E148},
+    {"LEFTLEG_1",   0x3E4CCCCD, 0x3E99999A},
+    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3E99999A},
+    {"LEFTLEG_2",   0x3E19999A, 0x3E666666},
+    {"RIGHTLEG_2",  0x3E19999A, 0x3E666666}
 };
-#define PATTERN_COUNT (sizeof(gPatterns)/sizeof(gPatterns[0]))
+#define HITBOX_COUNT (sizeof(gHitboxes)/sizeof(gHitboxes[0]))
+#define STEP_SIZE 0x20 // 32 bytes between each hitbox
 
 // ============================================================
 // 2. Logging helper
 // ============================================================
-static void write_log(NSString *message) {
+static void write_log(NSString *format, ...) {
     @autoreleasepool {
+        va_list args;
+        va_start(args, format);
+        NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+        va_end(args);
+        
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         NSString *documentsPath = [paths firstObject];
         NSString *savesPath = [documentsPath stringByAppendingPathComponent:@"saves"];
@@ -48,7 +56,7 @@ static void write_log(NSString *message) {
         NSString *logPath = [savesPath stringByAppendingPathComponent:@"HitBoxes.log"];
         
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
-        [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+        [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
         NSString *timestamp = [formatter stringFromDate:[NSDate date]];
         
         NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
@@ -72,7 +80,7 @@ static void write_log(NSString *message) {
 static void show_notification(NSString *title, NSString *subtitle);
 
 // ============================================================
-// 4. Memory scanning helpers
+// 4. Memory helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -88,70 +96,104 @@ static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
     return (kr == KERN_SUCCESS);
 }
 
-// Check if pattern exists at address with step 0x20
-static BOOL check_pattern_at_address(vm_address_t addr) {
-    uint32_t buf = 0;
+// ============================================================
+// 5. Pattern matching function
+// ============================================================
+static BOOL check_hitbox_pattern_at_address(vm_address_t addr) {
+    uint32_t value = 0;
     
-    // Check first pattern
-    if (!read_memory(addr, &buf, 4) || buf != gPatterns[0].original[0]) {
-        return NO;
-    }
+    write_log(@"  Verifying pattern at 0x%llX:", (unsigned long long)addr);
     
-    // Check all 10 patterns with 0x20 step
-    for (int i = 0; i < PATTERN_COUNT; i++) {
-        vm_address_t checkAddr = addr + i * 0x20;
-        if (!read_memory(checkAddr, &buf, 4)) {
+    // Check all 10 values with 0x20 spacing
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        vm_address_t checkAddr = addr + i * STEP_SIZE;
+        
+        if (!read_memory(checkAddr, &value, 4)) {
+            write_log(@"    ✗ FAIL: Cannot read %s at 0x%llX", 
+                     gHitboxes[i].name, (unsigned long long)checkAddr);
             return NO;
         }
-        if (buf != gPatterns[i].original[0]) {
+        
+        if (value != gHitboxes[i].original) {
+            write_log(@"    ✗ FAIL: %s expected 0x%08X got 0x%08X at 0x%llX", 
+                     gHitboxes[i].name, gHitboxes[i].original, value, 
+                     (unsigned long long)checkAddr);
             return NO;
         }
+        
+        write_log(@"    ✓ %s: 0x%08X at 0x%llX", 
+                 gHitboxes[i].name, value, (unsigned long long)checkAddr);
     }
+    
+    write_log(@"  ✓ FULL PATTERN MATCHED at 0x%llX!", (unsigned long long)addr);
     return YES;
 }
 
-// Scan all memory regions
-static vm_address_t scan_all_memory(void) {
+// ============================================================
+// 6. Scan memory for pattern
+// ============================================================
+static vm_address_t scan_memory_for_pattern(void) {
     vm_address_t address = 0;
     vm_size_t size = 0;
     vm_region_submap_info_64 info;
     mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
     natural_t depth = 0;
     int regionCount = 0;
+    int scannedRegions = 0;
+    uint32_t firstValue = gHitboxes[0].original;
     
-    write_log(@"Scanning ALL memory regions for hitbox pattern...");
+    write_log(@"");
+    write_log(@"=== SCANNING MEMORY FOR HITBOX PATTERN ===");
+    write_log(@"Looking for: 0x%08X (HEAD) followed by 0x%08X at +0x20", 
+             firstValue, gHitboxes[1].original);
+    write_log(@"");
     
     while (1) {
-        // Reset count for each region
         count = VM_REGION_SUBMAP_INFO_COUNT_64;
         kern_return_t kr = vm_region_recurse_64(gTask, &address, &size, &depth,
                                                 (vm_region_info_t)&info, &count);
-        if (kr != KERN_SUCCESS) break;
+        if (kr != KERN_SUCCESS) {
+            if (kr == KERN_INVALID_ADDRESS) break;
+            write_log(@"vm_region_recurse_64 error: %s", mach_error_string(kr));
+            break;
+        }
         
         regionCount++;
         
-        // Skip if no read permission
-        if (!(info.protection & VM_PROT_READ)) {
-            address += size;
-            continue;
-        }
-        
-        // Only scan regions that might contain data (RW, RWX, or RW-)
-        if (info.protection & VM_PROT_WRITE) {
-            if (regionCount % 50 == 0) {
-                write_log([NSString stringWithFormat:@"Scanning region #%d: 0x%llX - 0x%llX (size: 0x%llX, prot: %d)",
-                           regionCount, (unsigned long long)address, 
-                           (unsigned long long)(address + size), 
-                           (unsigned long long)size, info.protection]);
+        // Only scan readable and writable regions (where data lives)
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE)) {
+            scannedRegions++;
+            
+            if (scannedRegions % 10 == 0) {
+                write_log(@"Scanning region #%d: 0x%llX - 0x%llX (size: 0x%llX)", 
+                         regionCount, (unsigned long long)address, 
+                         (unsigned long long)(address + size), 
+                         (unsigned long long)size);
             }
             
-            // Scan this region for the pattern
-            vm_address_t found = 0;
+            // Scan for first value (HEAD)
+            uint32_t buf = 0;
             for (vm_address_t addr = address; addr < address + size - 4; addr += 4) {
-                if (check_pattern_at_address(addr)) {
-                    write_log([NSString stringWithFormat:@"Found pattern in region #%d at 0x%llX", 
-                               regionCount, (unsigned long long)addr]);
-                    return addr;
+                if (!read_memory(addr, &buf, 4)) continue;
+                
+                // Found HEAD candidate
+                if (buf == firstValue) {
+                    // Check if TORSO_1 exists at +0x20
+                    uint32_t secondBuf = 0;
+                    vm_address_t secondAddr = addr + STEP_SIZE;
+                    
+                    if (read_memory(secondAddr, &secondBuf, 4) && 
+                        secondBuf == gHitboxes[1].original) {
+                        
+                        write_log(@"");
+                        write_log(@"🔍 Found potential HEAD at 0x%llX with TORSO_1 at 0x%llX", 
+                                 (unsigned long long)addr, (unsigned long long)secondAddr);
+                        
+                        // Full verification of all 10 values
+                        if (check_hitbox_pattern_at_address(addr)) {
+                            return addr;
+                        }
+                    }
                 }
             }
         }
@@ -159,85 +201,93 @@ static vm_address_t scan_all_memory(void) {
         address += size;
     }
     
-    write_log([NSString stringWithFormat:@"Scanned %d total regions, pattern not found", regionCount]);
+    write_log(@"");
+    write_log(@"=== SCAN COMPLETE ===");
+    write_log(@"Total regions: %d, Scanned RW regions: %d", regionCount, scannedRegions);
     return 0;
 }
 
 // ============================================================
-// 5. Main patching logic
+// 7. Main patching logic
 // ============================================================
 static void patch_hitboxes(void) {
-    write_log(@"=== Hitbox Patcher Started ===");
-    write_log(@"Black Russia Client - Hitbox Scanner");
+    write_log(@"");
+    write_log(@"╔══════════════════════════════════════════════╗");
+    write_log(@"║    BLACK RUSSIA HITBOX PATCHER v2.0        ║");
+    write_log(@"║         Pattern-based search                ║");
+    write_log(@"╚══════════════════════════════════════════════╝");
+    write_log(@"");
     
     gTask = mach_task_self();
+    write_log(@"Task port: %d", gTask);
     
-    // Scan all memory regions
-    vm_address_t found = scan_all_memory();
+    // Scan memory
+    vm_address_t found = scan_memory_for_pattern();
     
     if (!found) {
-        write_log(@"ERROR: Hitbox pattern not found in any memory region");
-        show_notification(@"Hitboxes not found.", @"");
+        write_log(@"");
+        write_log(@"❌ HITBOXES NOT FOUND!");
+        show_notification(@"Hitboxes not found.", @"Check HitBoxes.log");
         return;
     }
     
-    write_log([NSString stringWithFormat:@"Found hitboxes at: 0x%llX", (unsigned long long)found]);
+    write_log(@"");
+    write_log(@"╔══════════════════════════════════════════════╗");
+    write_log(@"║        PATCHING HITBOXES                    ║");
+    write_log(@"╚══════════════════════════════════════════════╝");
+    write_log(@"");
     
-    // Verify all patterns before patching
-    BOOL allMatch = YES;
-    for (int i = 0; i < PATTERN_COUNT; i++) {
-        vm_address_t checkAddr = found + i * 0x20;
-        uint32_t value = 0;
-        if (!read_memory(checkAddr, &value, 4) || value != gPatterns[i].original[0]) {
-            allMatch = NO;
-            write_log([NSString stringWithFormat:@"VERIFY FAIL: %s at 0x%llX expected 0x%08X got 0x%08X",
-                       gPatterns[i].name, (unsigned long long)checkAddr, 
-                       gPatterns[i].original[0], value]);
-            break;
-        }
-    }
-    
-    if (!allMatch) {
-        write_log(@"ERROR: Pattern verification failed");
-        show_notification(@"Hitboxes verification failed.", @"");
-        return;
-    }
-    
-    write_log(@"Pattern verified, applying patches...");
-    
-    // Patch all 10 values
+    // Patch all values
     BOOL success = YES;
-    for (int i = 0; i < PATTERN_COUNT; i++) {
-        vm_address_t patchAddr = found + i * 0x20;
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        vm_address_t patchAddr = found + i * STEP_SIZE;
         uint32_t originalValue = 0;
+        uint32_t newValue = gHitboxes[i].patched;
+        
         read_memory(patchAddr, &originalValue, 4);
         
-        if (!write_memory(patchAddr, &gPatterns[i].patched[0], 4)) {
+        float originalFloat = *(float*)&originalValue;
+        float newFloat = *(float*)&newValue;
+        
+        write_log(@"Patching %s at 0x%llX:", gHitboxes[i].name, (unsigned long long)patchAddr);
+        write_log(@"  Original: 0x%08X (%.3f)", originalValue, originalFloat);
+        write_log(@"  New:      0x%08X (%.3f)", newValue, newFloat);
+        
+        if (!write_memory(patchAddr, &newValue, 4)) {
             success = NO;
-            write_log([NSString stringWithFormat:@"ERROR: Failed to patch %s at 0x%llX", 
-                       gPatterns[i].name, (unsigned long long)patchAddr]);
+            write_log(@"  ✗ WRITE FAILED!");
             break;
         }
         
-        write_log([NSString stringWithFormat:@"Patched %s: 0x%08X -> 0x%08X at 0x%llX", 
-                   gPatterns[i].name, originalValue, gPatterns[i].patched[0], 
-                   (unsigned long long)patchAddr]);
+        // Verify
+        uint32_t verifyValue = 0;
+        read_memory(patchAddr, &verifyValue, 4);
+        if (verifyValue == newValue) {
+            write_log(@"  ✓ SUCCESS");
+        } else {
+            write_log(@"  ✗ VERIFY FAILED! Expected 0x%08X got 0x%08X", newValue, verifyValue);
+            success = NO;
+            break;
+        }
     }
     
+    write_log(@"");
     if (success) {
-        write_log(@"SUCCESS: All 10 hitboxes patched!");
+        write_log(@"╔══════════════════════════════════════════════╗");
+        write_log(@"║        ✓ ALL HITBOXES PATCHED!             ║");
+        write_log(@"╚══════════════════════════════════════════════╝");
         NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX", (unsigned long long)found];
         show_notification(@"Hitboxes patched successfully!", msg);
     } else {
-        write_log(@"ERROR: Partial patch - some hitboxes failed");
-        show_notification(@"Hitboxes patched partially.", @"");
+        write_log(@"╔══════════════════════════════════════════════╗");
+        write_log(@"║        ❌ PATCH FAILED!                    ║");
+        write_log(@"╚══════════════════════════════════════════════╝");
+        show_notification(@"Patch failed.", @"Check HitBoxes.log");
     }
-    
-    write_log(@"=== Hitbox Patcher Finished ===\n");
 }
 
 // ============================================================
-// 6. Notification display (UIAlertController)
+// 8. Notification display
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -282,21 +332,23 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 7. Entry point
+// 9. Entry point
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
-    write_log(@"=== Hitbox Patcher Loaded ===");
-    write_log(@"Black Russia Client - Injecting...");
+    write_log(@"╔══════════════════════════════════════════════╗");
+    write_log(@"║   BLACK RUSSIA HITBOX PATCHER INJECTED     ║");
+    write_log(@"╚══════════════════════════════════════════════╝");
+    write_log(@"Waiting 5 seconds for Black Russia to fully load...");
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         patch_hitboxes();
     });
 }
 
 // ============================================================
-// 8. Dummy export
+// 10. Dummy export
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
