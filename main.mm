@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed relative address display
+// FIXED: Proper relative address calculation (no sign extension)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -213,7 +213,7 @@ static vm_address_t find_blackrussia_framework(void) {
 // ============================================================
 // 8. Search with float tolerance
 // ============================================================
-static vm_address_t find_hitboxes(uint64_t *outRelativeAddr) {
+static vm_address_t find_hitboxes(vm_address_t *outRelativeAddr) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
     write_log(@"║       SEARCHING HITBOXES (float tolerance: %.3f)        ║", TOLERANCE);
@@ -279,14 +279,15 @@ static vm_address_t find_hitboxes(uint64_t *outRelativeAddr) {
             if (allMatch && matched == HITBOX_COUNT) {
                 candidates++;
                 
-                // Calculate relative address (unsigned 64-bit)
-                uint64_t relativeAddr = (uint64_t)(addr - gFrameworkBase);
+                // CORRECT: Simple subtraction, no sign extension
+                vm_address_t relativeAddr = addr - gFrameworkBase;
                 *outRelativeAddr = relativeAddr;
                 
                 write_log(@"");
                 write_log(@"🎯 Found candidate #%d at:", candidates);
                 write_log(@"  Absolute: 0x%llX", (unsigned long long)addr);
-                write_log(@"  Relative: 0x%llX", (unsigned long long)relativeAddr);
+                write_log(@"  Base:     0x%llX", (unsigned long long)gFrameworkBase);
+                write_log(@"  Relative: 0x%llX (absolute - base)", (unsigned long long)relativeAddr);
                 write_log(@"  Section: %s", sectName);
                 write_log(@"");
                 write_log(@"📋 Verified values:");
@@ -323,8 +324,8 @@ static vm_address_t find_hitboxes(uint64_t *outRelativeAddr) {
 static void patch_hitboxes(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v11.0                ║");
-    write_log(@"║        Relative address display                         ║");
+    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v12.0                ║");
+    write_log(@"║        FIXED relative address calculation               ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -349,7 +350,7 @@ static void patch_hitboxes(void) {
         return;
     }
     
-    uint64_t relativeAddr = 0;
+    vm_address_t relativeAddr = 0;
     vm_address_t found = find_hitboxes(&relativeAddr);
     
     if (!found) {
@@ -376,7 +377,7 @@ static void patch_hitboxes(void) {
         float newFloat = *(float*)&newValue;
         
         write_log(@"📝 %s:", gHitboxes[i].name);
-        write_log(@"  Absolute: 0x%llX", (unsigned long long)patchAddr);
+        write_log(@"  Address:  0x%llX", (unsigned long long)patchAddr);
         write_log(@"  Original: 0x%08X (%.3f)", originalValue, originalFloat);
         write_log(@"  New:      0x%08X (%.3f) x2", newValue, newFloat);
         
@@ -405,7 +406,7 @@ static void patch_hitboxes(void) {
         write_log(@"║     Relative offset: 0x%llX                            ║", (unsigned long long)relativeAddr);
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
         
-        // Use stringWithFormat with unsigned long long to avoid sign extension
+        // Format as 0x14EC888 (without sign extension)
         NSString *msg = [NSString stringWithFormat:@"Offset: 0x%llX\nx2 Hitboxes active!", 
                         (unsigned long long)relativeAddr];
         show_notification(@"Hitboxes patched successfully!", msg);
@@ -481,8 +482,8 @@ __attribute__((constructor))
 static void initialize(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v11.0 INJECTED         ║");
-    write_log(@"║      Relative address: 0x14EC888                        ║");
+    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v12.0 INJECTED         ║");
+    write_log(@"║      Expected relative address: 0x14EC888               ║");
     write_log(@"║      Float tolerance: 0.005                             ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
