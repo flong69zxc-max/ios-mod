@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Scans ALL sections of blackrussia-client.framework
+// Flexible pattern search with float tolerance
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -11,31 +11,32 @@
 #import <mach-o/getsect.h>
 
 // ============================================================
-// 1. Original hitbox values (from memory dump)
+// 1. Hitbox values with float tolerance
 // ============================================================
 typedef struct {
     const char *name;
     uint32_t original;
-    uint32_t patched;
     float originalFloat;
+    uint32_t patched;
     float patchedFloat;
 } HitboxValue;
 
+// Значения из дампа (актуальные для этой версии)
 static HitboxValue gHitboxes[] = {
-    {"HEAD",        0x3E19999A, 0x3E99999A, 0.15f, 0.30f},
-    {"TORSO_1",     0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},
-    {"TORSO_2",     0x3E800000, 0x3F000000, 0.25f, 0.50f},
-    {"MID",         0x3E800000, 0x3F000000, 0.25f, 0.50f},
-    {"LEFTARM",     0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},
-    {"RIGHTARM",    0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},
-    {"LEFTLEG_1",   0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},
-    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},
-    {"LEFTLEG_2",   0x3E19999A, 0x3E99999A, 0.15f, 0.30f},
-    {"RIGHTLEG_2",  0x3E19999A, 0x3E99999A, 0x15f, 0.30f}
+    {"HEAD",        0x3E19999A, 0.15f, 0x3E99999A, 0.30f},
+    {"TORSO_1",     0x3E4CCCCD, 0.20f, 0x3ECCCCCD, 0.40f},
+    {"TORSO_2",     0x3E800000, 0.25f, 0x3F000000, 0.50f},
+    {"MID",         0x3E800000, 0.25f, 0x3F000000, 0.50f},
+    {"LEFTARM",     0x3E23D70A, 0.16f, 0x3EA3D70A, 0.32f},  // Из дампа
+    {"RIGHTARM",    0x3E23D70A, 0.16f, 0x3EA3D70A, 0.32f},  // Из дампа
+    {"LEFTLEG_1",   0x3E4CCCCD, 0.20f, 0x3ECCCCCD, 0.40f},
+    {"RIGHTLEG_1",  0x3E4CCCCD, 0.20f, 0x3ECCCCCD, 0.40f},
+    {"LEFTLEG_2",   0x3E19999A, 0.15f, 0x3E99999A, 0.30f},
+    {"RIGHTLEG_2",  0x3E19999A, 0.15f, 0x3E99999A, 0.30f}
 };
 #define HITBOX_COUNT (sizeof(gHitboxes)/sizeof(gHitboxes[0]))
 #define STEP_SIZE 0x20
-#define TOLERANCE 0.001f
+#define TOLERANCE 0.005f
 
 // ============================================================
 // 2. Memory helpers
@@ -95,7 +96,7 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 4. Hex dump helper
+// 4. Hex dump
 // ============================================================
 static NSString *hexDump(vm_address_t addr, size_t length) {
     NSMutableString *hex = [NSMutableString string];
@@ -114,12 +115,7 @@ static NSString *hexDump(vm_address_t addr, size_t length) {
 }
 
 // ============================================================
-// 5. Forward declaration
-// ============================================================
-static void show_notification(NSString *title, NSString *subtitle);
-
-// ============================================================
-// 6. Find blackrussia-client framework and ALL sections
+// 5. Find blackrussia-client
 // ============================================================
 typedef struct {
     vm_address_t addr;
@@ -127,17 +123,17 @@ typedef struct {
     const char *name;
 } MemorySection;
 
-static MemorySection gSections[10];
+static MemorySection gSections[20];
 static int gSectionCount = 0;
 
 static void add_section(vm_address_t addr, vm_size_t size, const char *name) {
     if (addr == 0 || size == 0) return;
-    if (gSectionCount < 10) {
+    if (gSectionCount < 20) {
         gSections[gSectionCount].addr = addr;
         gSections[gSectionCount].size = size;
         gSections[gSectionCount].name = name;
         gSectionCount++;
-        write_log(@"  📁 %s: 0x%llX - 0x%llX (size: 0x%llX)", 
+        write_log(@"  📁 %s: 0x%llX - 0x%llX (0x%llX bytes)", 
                  name, (unsigned long long)addr, 
                  (unsigned long long)(addr + size), 
                  (unsigned long long)size);
@@ -147,7 +143,7 @@ static void add_section(vm_address_t addr, vm_size_t size, const char *name) {
 static vm_address_t find_blackrussia_framework(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║        SCANNING blackrussia-client.framework             ║");
+    write_log(@"║        SEARCHING blackrussia-client.framework            ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -165,46 +161,31 @@ static vm_address_t find_blackrussia_framework(void) {
             
             write_log(@"🎯 FOUND blackrussia-client!");
             write_log(@"  ┌─────────────────────────────────────────────");
-            write_log(@"  │ Image index: %d", i);
+            write_log(@"  │ Index: %d", i);
             write_log(@"  │ Path: %s", name);
             write_log(@"  │ Header: 0x%llX", (unsigned long long)header);
             write_log(@"  │ Slide: 0x%lX", (unsigned long)slide);
             write_log(@"  └─────────────────────────────────────────────");
             write_log(@"");
-            write_log(@"📁 Scanning all sections...");
+            write_log(@"📁 Scanning sections...");
             
             gSectionCount = 0;
-            
-            // Get all sections
             uint64_t size = 0;
             
-            // __DATA.__data
             char *ptr = getsectdatafromheader_64(header, "__DATA", "__data", &size);
             if (ptr) add_section((vm_address_t)ptr + slide, size, "__DATA.__data");
             
-            // __DATA.__const
             ptr = getsectdatafromheader_64(header, "__DATA", "__const", &size);
             if (ptr) add_section((vm_address_t)ptr + slide, size, "__DATA.__const");
             
-            // __DATA_CONST.__const
             ptr = getsectdatafromheader_64(header, "__DATA_CONST", "__const", &size);
             if (ptr) add_section((vm_address_t)ptr + slide, size, "__DATA_CONST.__const");
             
-            // __DATA.__bss
             ptr = getsectdatafromheader_64(header, "__DATA", "__bss", &size);
             if (ptr) add_section((vm_address_t)ptr + slide, size, "__DATA.__bss");
             
-            // __TEXT.__text
-            ptr = getsectdatafromheader_64(header, "__TEXT", "__text", &size);
-            if (ptr) add_section((vm_address_t)ptr + slide, size, "__TEXT.__text");
-            
-            // __TEXT.__const
-            ptr = getsectdatafromheader_64(header, "__TEXT", "__const", &size);
-            if (ptr) add_section((vm_address_t)ptr + slide, size, "__TEXT.__const");
-            
             write_log(@"");
-            write_log(@"📊 Total sections found: %d", gSectionCount);
-            
+            write_log(@"📊 Total sections: %d", gSectionCount);
             return (vm_address_t)header + slide;
         }
     }
@@ -214,20 +195,20 @@ static vm_address_t find_blackrussia_framework(void) {
 }
 
 // ============================================================
-// 7. Search with tolerance in ALL sections
+// 6. Search with float tolerance (compares float values, not bytes)
 // ============================================================
-static vm_address_t find_in_all_sections(void) {
+static vm_address_t find_hitboxes(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║      SCANNING ALL SECTIONS WITH TOLERANCE (%.3f)        ║", TOLERANCE);
+    write_log(@"║       SEARCHING HITBOXES (float tolerance: %.3f)        ║", TOLERANCE);
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
-    write_log(@"🔍 Looking for pattern from memory dump:");
-    write_log(@"  0x...888: 9A 99 19 3E (HEAD)");
-    write_log(@"  0x...8A8: CD CC 4C 3E (TORSO_1)");
-    write_log(@"  0x...8C8: 00 00 80 3E (TORSO_2)");
-    write_log(@"  0x...8E8: 00 00 80 3E (MID)");
-    write_log(@"  0x...908: 0A D7 23 3E (LEFTARM)");
+    
+    // Show pattern
+    write_log(@"🔍 Looking for pattern (10 values, step 0x%X):", STEP_SIZE);
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        write_log(@"  +0x%03X: %s = %.3f", i * STEP_SIZE, gHitboxes[i].name, gHitboxes[i].originalFloat);
+    }
     write_log(@"");
     
     int totalScanned = 0;
@@ -237,44 +218,33 @@ static vm_address_t find_in_all_sections(void) {
         vm_size_t size = gSections[si].size;
         const char *sectName = gSections[si].name;
         
+        // Skip tiny sections
+        if (size < HITBOX_COUNT * STEP_SIZE) continue;
+        
         write_log(@"");
-        write_log(@"🔎 Scanning %s:", sectName);
-        write_log(@"  Range: 0x%llX - 0x%llX (size: 0x%llX)", 
-                 (unsigned long long)start, 
-                 (unsigned long long)(start + size), 
-                 (unsigned long long)size);
+        write_log(@"🔎 Scanning %s (0x%llX bytes)", sectName, (unsigned long long)size);
         
         int checked = 0;
         int candidates = 0;
         
-        for (vm_address_t addr = start; addr < start + size - 4; addr += 4) {
+        for (vm_address_t addr = start; addr < start + size - (HITBOX_COUNT * STEP_SIZE); addr += 4) {
             checked++;
             totalScanned++;
             
-            if (checked % 50000 == 0) {
-                write_log(@"  Scanned %d positions in %s", checked, sectName);
+            if (checked % 100000 == 0) {
+                write_log(@"  📊 Scanned %d positions in %s", checked, sectName);
             }
             
-            // Check HEAD (exact match required)
+            // Check HEAD (must be exact)
             uint32_t headVal = 0;
             if (!read_memory(addr, &headVal, 4)) continue;
             if (headVal != gHitboxes[0].original) continue;
             
-            // Check TORSO_1 at +0x20 (exact match required)
-            uint32_t torsoVal = 0;
-            if (!read_memory(addr + STEP_SIZE, &torsoVal, 4)) continue;
-            if (torsoVal != gHitboxes[1].original) continue;
-            
-            candidates++;
-            write_log(@"");
-            write_log(@"  🔍 Candidate #%d at 0x%llX (in %s)", 
-                     candidates, (unsigned long long)addr, sectName);
-            
-            // Check remaining values with tolerance
+            // Now verify all values with tolerance
             BOOL allMatch = YES;
-            int matched = 2;
+            int matched = 0;
             
-            for (int i = 2; i < HITBOX_COUNT; i++) {
+            for (int i = 0; i < HITBOX_COUNT; i++) {
                 vm_address_t checkAddr = addr + i * STEP_SIZE;
                 uint32_t val = 0;
                 if (!read_memory(checkAddr, &val, 4)) {
@@ -289,49 +259,52 @@ static vm_address_t find_in_all_sections(void) {
                 if (diff <= TOLERANCE) {
                     matched++;
                 } else {
-                    write_log(@"    ✗ %s: expected 0x%08X (%.3f), got 0x%08X (%.3f)", 
-                             gHitboxes[i].name, gHitboxes[i].original, expected, val, actual);
                     allMatch = NO;
+                    break;
                 }
             }
             
             if (allMatch && matched == HITBOX_COUNT) {
+                candidates++;
                 write_log(@"");
-                write_log(@"╔═══════════════════════════════════════════════════════════╗");
-                write_log(@"║     ✅ ALL %d HITBOXES MATCHED in %s!                    ║", HITBOX_COUNT, sectName);
-                write_log(@"╚═══════════════════════════════════════════════════════════╝");
+                write_log(@"🎯 Found candidate #%d at 0x%llX in %s", 
+                         candidates, (unsigned long long)addr, sectName);
                 write_log(@"");
-                write_log(@"📍 Found at: 0x%llX", (unsigned long long)addr);
+                write_log(@"📋 Verified values:");
                 
-                // Show all values
                 for (int i = 0; i < HITBOX_COUNT; i++) {
                     vm_address_t checkAddr = addr + i * STEP_SIZE;
                     uint32_t val = 0;
                     read_memory(checkAddr, &val, 4);
-                    write_log(@"  %s: 0x%08X (%.3f) at 0x%llX", 
-                             gHitboxes[i].name, val, *(float*)&val, (unsigned long long)checkAddr);
+                    float actual = *(float*)&val;
+                    write_log(@"  +0x%03X %s: 0x%08X = %.3f (expected: %.3f)", 
+                             i * STEP_SIZE, gHitboxes[i].name, val, actual, gHitboxes[i].originalFloat);
                 }
                 
+                write_log(@"");
+                write_log(@"╔═══════════════════════════════════════════════════════════╗");
+                write_log(@"║     ✅ ALL %d HITBOXES FOUND!                           ║", HITBOX_COUNT);
+                write_log(@"╚═══════════════════════════════════════════════════════════╝");
                 return addr;
             }
         }
         
-        write_log(@"  Scanned %d positions in %s, found %d candidates", checked, sectName, candidates);
+        write_log(@"  📊 Scanned %d positions in %s, found %d candidates", checked, sectName, candidates);
     }
     
     write_log(@"");
-    write_log(@"❌ Pattern not found. Total scanned: %d positions", totalScanned);
+    write_log(@"❌ Hitboxes NOT found. Total scanned: %d positions", totalScanned);
     return 0;
 }
 
 // ============================================================
-// 8. Main patching logic
+// 7. Main patching
 // ============================================================
 static void patch_hitboxes(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v8.0                 ║");
-    write_log(@"║        Scanning ALL sections of framework                ║");
+    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v10.0                ║");
+    write_log(@"║        Float tolerance search                           ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -349,21 +322,19 @@ static void patch_hitboxes(void) {
     }
     write_log(@"");
     
-    // Find framework and all sections
-    vm_address_t base = find_blackrussia_framework();
+    // Find framework
+    find_blackrussia_framework();
     
-    if (base == 0 || gSectionCount == 0) {
-        write_log(@"");
-        write_log(@"❌ CRITICAL: blackrussia-client NOT FOUND!");
+    if (gSectionCount == 0) {
+        write_log(@"❌ No sections found!");
         show_notification(@"blackrussia-client not found.", @"Check HitBoxes.log");
         return;
     }
     
-    // Search in all sections
-    vm_address_t found = find_in_all_sections();
+    // Search
+    vm_address_t found = find_hitboxes();
     
     if (!found) {
-        write_log(@"");
         write_log(@"❌ HITBOXES NOT FOUND!");
         show_notification(@"Hitboxes not found.", @"Check HitBoxes.log");
         return;
@@ -425,7 +396,7 @@ static void patch_hitboxes(void) {
 }
 
 // ============================================================
-// 9. Notification display
+// 8. Notification
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -482,17 +453,17 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 10. Entry point
+// 9. Entry point
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v8.0 INJECTED          ║");
-    write_log(@"║      Scanning ALL sections of framework                  ║");
+    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v10.0 INJECTED         ║");
+    write_log(@"║      Float tolerance search (%.3f)                      ║", TOLERANCE);
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
-    write_log(@"⏳ Waiting 5 seconds for Black Russia to fully load...");
+    write_log(@"⏳ Waiting 5 seconds...");
     write_log(@"");
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
@@ -502,7 +473,7 @@ static void initialize(void) {
 }
 
 // ============================================================
-// 11. Dummy export
+// 10. Dummy export
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
