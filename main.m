@@ -24,6 +24,8 @@ static HitboxPair g_hitboxes[] = {
 
 #define HITBOX_COUNT (sizeof(g_hitboxes) / sizeof(HitboxPair))
 
+static void patchHitboxes(void);
+
 static uintptr_t getFrameworkRange(uintptr_t *start, uintptr_t *end) {
     Dl_info info;
     if (dladdr((const void *)patchHitboxes, &info) == 0) return 0;
@@ -64,6 +66,20 @@ static uintptr_t findPattern(uint32_t pattern[4]) {
     return 0;
 }
 
+static UIViewController *getTopViewController(void) {
+    UIWindowScene *scene = (UIWindowScene *)[[[UIApplication sharedApplication] connectedScenes] allObjects].firstObject;
+    UIWindow *keyWindow = scene.windows.firstObject;
+    if (!keyWindow) {
+        for (UIWindowScene *s in [[UIApplication sharedApplication] connectedScenes]) {
+            if (s.activationState == UISceneActivationStateForegroundActive) {
+                keyWindow = s.windows.firstObject;
+                break;
+            }
+        }
+    }
+    return keyWindow.rootViewController;
+}
+
 static void showNotification(int found, uintptr_t offsets[10]) {
     dispatch_async(dispatch_get_main_queue(), ^{
         NSMutableString *msg = [NSMutableString string];
@@ -71,7 +87,7 @@ static void showNotification(int found, uintptr_t offsets[10]) {
         if (found == HITBOX_COUNT) {
             [msg appendString:@"✅ Все хитбоксы записаны\n\n"];
         } else if (found > 0) {
-            [msg appendFormat:@"⚠️ Найдено %d из %d\n\n", found, HITBOX_COUNT];
+            [msg appendFormat:@"⚠️ Найдено %d из %lu\n\n", found, (unsigned long)HITBOX_COUNT];
         } else {
             [msg appendString:@"❌ Хитбоксы не найдены\n"];
         }
@@ -86,9 +102,10 @@ static void showNotification(int found, uintptr_t offsets[10]) {
             preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
         
-        UIWindow *keyWindow = [UIApplication sharedApplication].keyWindow;
-        if (!keyWindow) keyWindow = [UIApplication sharedApplication].windows.firstObject;
-        [keyWindow.rootViewController presentViewController:alert animated:YES completion:nil];
+        UIViewController *topVC = getTopViewController();
+        if (topVC) {
+            [topVC presentViewController:alert animated:YES completion:nil];
+        }
     });
 }
 
