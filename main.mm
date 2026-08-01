@@ -1,6 +1,6 @@
-// main.mm - Black Russia Hitbox Patcher (ARM64) - ULTIMATE VERSION
+// main.mm - Black Russia Hitbox Patcher - C++ VERSION
 // ✅ РАБОТАЕТ ТОЛЬКО С АБСОЛЮТНЫМИ АДРЕСАМИ
-// ✅ ДИНАМИЧЕСКИЙ ПОИСК (НИКАКИХ ХАРДКОДОВ)
+// ✅ ДИНАМИЧЕСКИЙ ПОИСК
 // ✅ ПРАВИЛЬНЫЙ РАСЧЕТ ОТНОСИТЕЛЬНОГО И АБСОЛЮТНОГО АДРЕСОВ
 
 #import <Foundation/Foundation.h>
@@ -12,8 +12,8 @@
 #import <mach-o/loader.h>
 #import <mach-o/getsect.h>
 #import <mach-o/nlist.h>
-#import <mutex>
-#import <vector>
+#include <mutex>
+#include <vector>
 
 // ============================================================
 // 1. Hitbox структура с float значениями
@@ -112,7 +112,7 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 5. Показ уведомлений (перенесено ВВЕРХ, до использования)
+// 5. Показ уведомлений
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -132,7 +132,6 @@ static void show_notification(NSString *title, NSString *subtitle) {
             }
         }
         
-        // Fallback для старых версий
         if (!window) {
             if (@available(iOS 13.0, *)) {
                 for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -145,7 +144,6 @@ static void show_notification(NSString *title, NSString *subtitle) {
                     }
                 }
             } else {
-                // Используем старый API только для iOS < 13
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
                 NSArray *windows = [UIApplication sharedApplication].windows;
@@ -578,8 +576,8 @@ extern "C" void __dummy_export(void) {}
 
 // ============================================================
 // Компиляция:
-// xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
+// xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
 //   -framework Foundation -framework UIKit \
-//   -std=c++17 -O3 \
+//   -stdlib=libc++ -std=c++17 -O3 \
 //   -o hitbox_patcher.dylib main.mm
 // ============================================================
