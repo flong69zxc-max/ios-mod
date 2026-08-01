@@ -5,6 +5,16 @@
 #import <unistd.h>
 #import <stdlib.h>
 
+// Цвета
+#define RESET   "\033[0m"
+#define RED     "\033[31m"
+#define GREEN   "\033[32m"
+#define YELLOW  "\033[33m"
+#define BLUE    "\033[34m"
+#define MAGENTA "\033[35m"
+#define CYAN    "\033[36m"
+#define BOLD    "\033[1m"
+
 // Для показа уведомления в игре
 @interface AlertView : NSObject
 + (void)showAlertWithTitle:(NSString *)title message:(NSString *)message;
@@ -25,20 +35,50 @@
         
         [alert addAction:okAction];
         
-        UIViewController *rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+        // Исправленный способ получения root VC
+        UIViewController *rootVC = nil;
+        
+        // Для iOS 13+
+        if (@available(iOS 13.0, *)) {
+            UIWindowScene *scene = (UIWindowScene *)[[[UIApplication sharedApplication] connectedScenes] anyObject];
+            if (scene) {
+                rootVC = scene.windows.firstObject.rootViewController;
+            }
+        }
+        
+        // Fallback для старых версий
+        if (!rootVC) {
+            rootVC = [UIApplication sharedApplication].keyWindow.rootViewController;
+        }
+        
+        if (!rootVC) {
+            // Ищем через windows
+            NSArray *windows = [UIApplication sharedApplication].windows;
+            for (UIWindow *window in windows) {
+                if (window.rootViewController) {
+                    rootVC = window.rootViewController;
+                    break;
+                }
+            }
+        }
+        
         if (rootVC) {
             [rootVC presentViewController:alert animated:YES completion:nil];
         } else {
-            for (UIWindow *window in [UIApplication sharedApplication].windows) {
-                if (window.rootViewController) {
-                    [window.rootViewController presentViewController:alert animated:YES completion:nil];
-                    break;
-                }
+            // Если всё равно нет, пробуем через делегат
+            rootVC = [UIApplication sharedApplication].delegate.window.rootViewController;
+            if (rootVC) {
+                [rootVC presentViewController:alert animated:YES completion:nil];
             }
         }
     });
 }
 @end
+
+// Прототипы функций
+void show_game_notification(const char *title, const char *message);
+void log_and_notify(const char *status, const char *msg);
+NSString* getDownloadsPath(void);
 
 typedef struct {
     float head;
@@ -63,13 +103,13 @@ typedef struct {
 } HitboxValues;
 
 const float original_values[10] = {
-    0.15, 0.20, 0.25, 0.25, 0.16,
-    0.16, 0.20, 0.20, 0.15, 0.15
+    0.15f, 0.20f, 0.25f, 0.25f, 0.16f,
+    0.16f, 0.20f, 0.20f, 0.15f, 0.15f
 };
 
 const float new_values[10] = {
-    0.225, 0.30, 0.375, 0.375, 0.24,
-    0.24, 0.30, 0.30, 0.225, 0.225
+    0.225f, 0.30f, 0.375f, 0.375f, 0.24f,
+    0.24f, 0.30f, 0.30f, 0.225f, 0.225f
 };
 
 const char *names[10] = {
@@ -82,7 +122,6 @@ NSString* getDownloadsPath(void) {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
     NSString *documentsPath = [paths objectAtIndex:0];
     
-    // Создаём папку Downloads, если её нет
     NSString *downloadsPath = [documentsPath stringByAppendingPathComponent:@"Downloads"];
     NSFileManager *fileManager = [NSFileManager defaultManager];
     
@@ -93,7 +132,6 @@ NSString* getDownloadsPath(void) {
                                      error:nil];
     }
     
-    // Если не создалась, используем Documents
     if (![fileManager fileExistsAtPath:downloadsPath]) {
         downloadsPath = documentsPath;
     }
@@ -123,7 +161,6 @@ void log_to_file(const char *msg) {
 }
 
 void log_and_notify(const char *status, const char *msg) {
-    // В консоль
     time_t now = time(NULL);
     struct tm *tm = localtime(&now);
     char time_str[20];
@@ -141,14 +178,18 @@ void log_and_notify(const char *status, const char *msg) {
         printf(YELLOW "[%s] ⚠️ " RESET "%s\n", time_str, msg);
     }
     
-    // В лог-файл в папку Загрузки
     log_to_file(msg);
+}
+
+void show_game_notification(const char *title, const char *message) {
+    NSString *nsTitle = [NSString stringWithUTF8String:title];
+    NSString *nsMessage = [NSString stringWithUTF8String:message];
+    [AlertView showAlertWithTitle:nsTitle message:nsMessage];
 }
 
 int patch_file(const char *filepath) {
     log_and_notify("INFO", "🚀 Запуск патча хитбоксов...");
     
-    // Проверяем файл
     if (access(filepath, F_OK) != 0) {
         char error_msg[512];
         snprintf(error_msg, sizeof(error_msg), "❌ Файл не найден: %s", filepath);
@@ -165,7 +206,6 @@ int patch_file(const char *filepath) {
         return 1;
     }
     
-    // Размер
     fseek(file, 0, SEEK_END);
     long filesize = ftell(file);
     fseek(file, 0, SEEK_SET);
@@ -181,7 +221,6 @@ int patch_file(const char *filepath) {
         return 1;
     }
     
-    // Читаем
     log_and_notify("INFO", "📖 Читаю файл в память...");
     unsigned char *buffer = (unsigned char*)malloc(filesize);
     if (!buffer) {
@@ -198,15 +237,16 @@ int patch_file(const char *filepath) {
     snprintf(read_msg, sizeof(read_msg), "✅ Прочитано байт: %zu", read_bytes);
     log_and_notify("INFO", read_msg);
     
-    // Ищем структуру
     log_and_notify("INFO", "🔍 Поиск структуры хитбоксов...");
     int found = 0;
     long pos = 0;
     HitboxValues *hitbox;
     
+    // Сравниваем с сигнатурой через hex
+    unsigned char signature[4] = {0x9A, 0x99, 0x19, 0x3E}; // 0.15 в float
+    
     for (long i = 0; i <= filesize - sizeof(HitboxValues); i += 4) {
-        float *ptr = (float*)(buffer + i);
-        if (*ptr == 0.15) {
+        if (memcmp(buffer + i, signature, 4) == 0) {
             hitbox = (HitboxValues*)(buffer + i);
             
             float values[10] = {
@@ -218,7 +258,8 @@ int patch_file(const char *filepath) {
             
             int match = 1;
             for (int j = 0; j < 10; j++) {
-                if (values[j] != original_values[j]) {
+                // Сравниваем с погрешностью
+                if (fabs(values[j] - original_values[j]) > 0.001f) {
                     match = 0;
                     break;
                 }
@@ -244,7 +285,6 @@ int patch_file(const char *filepath) {
     snprintf(found_msg, sizeof(found_msg), "✅ Структура найдена по адресу: 0x%lX", pos);
     log_and_notify("SUCCESS", found_msg);
     
-    // Показываем найденные значения
     hitbox = (HitboxValues*)(buffer + pos);
     float old_vals[10] = {
         hitbox->head, hitbox->torso_1, hitbox->torso_2,
@@ -253,7 +293,6 @@ int patch_file(const char *filepath) {
         hitbox->pelvis
     };
     
-    // Логируем найденные значения
     for (int i = 0; i < 10; i++) {
         char val_msg[100];
         snprintf(val_msg, sizeof(val_msg), "  %s: %.3f (0x%lX)", 
@@ -261,7 +300,6 @@ int patch_file(const char *filepath) {
         log_and_notify("INFO", val_msg);
     }
     
-    // Формируем сообщение для игры
     char game_msg[1024];
     snprintf(game_msg, sizeof(game_msg), 
         "📍 Адрес: 0x%lX\n\n"
@@ -282,7 +320,6 @@ int patch_file(const char *filepath) {
     
     show_game_notification("🎯 ХИТБОКСЫ НАЙДЕНЫ", game_msg);
     
-    // Бэкап
     log_and_notify("INFO", "💾 Создаю бэкап...");
     char backup_path[512];
     snprintf(backup_path, sizeof(backup_path), "%s.backup", filepath);
@@ -296,7 +333,6 @@ int patch_file(const char *filepath) {
         log_and_notify("WARN", "⚠️ Не удалось создать бэкап!");
     }
     
-    // Применяем патч
     log_and_notify("INFO", "🛠 Применяю патч...");
     hitbox->head = new_values[0];
     hitbox->torso_1 = new_values[1];
@@ -309,7 +345,6 @@ int patch_file(const char *filepath) {
     hitbox->stomach = new_values[8];
     hitbox->pelvis = new_values[9];
     
-    // Записываем обратно
     file = fopen(filepath, "wb");
     if (!file) {
         log_and_notify("ERROR", "❌ Не удалось открыть для записи!");
@@ -326,7 +361,6 @@ int patch_file(const char *filepath) {
     snprintf(write_msg, sizeof(write_msg), "✅ Записано байт: %zu", written);
     log_and_notify("INFO", write_msg);
     
-    // Логируем новые значения
     for (int i = 0; i < 10; i++) {
         char val_msg[100];
         snprintf(val_msg, sizeof(val_msg), "  %s: %.3f → %.3f", 
@@ -334,7 +368,6 @@ int patch_file(const char *filepath) {
         log_and_notify("OK", val_msg);
     }
     
-    // Формируем финальное сообщение
     char result_msg[1024];
     snprintf(result_msg, sizeof(result_msg),
         "✅ ПАТЧ ПРИМЕНЁН!\n\n"
@@ -371,22 +404,18 @@ int patch_file(const char *filepath) {
     return 0;
 }
 
-// Точка входа для iOS
 __attribute__((constructor)) void init() {
     @autoreleasepool {
         printf("\n═══════════════════════════════════════════════\n");
         printf("   HITBOX PATCHER v3.0 — Logs to Downloads\n");
         printf("═══════════════════════════════════════════════\n\n");
         
-        // Показываем путь к логу
         NSString *downloadsPath = getDownloadsPath();
         NSString *logPath = [downloadsPath stringByAppendingPathComponent:@"hitbox_patch.log"];
         printf("📁 Лог будет сохранён: %s\n\n", [logPath UTF8String]);
         
-        // Путь по умолчанию
         const char *filepath = "Payload/BlackRussia.app/Frameworks/blackrussia-client.framework/blackrussia-client";
         
-        // Проверяем, есть ли файл
         if (access(filepath, F_OK) == 0) {
             patch_file(filepath);
         } else {
