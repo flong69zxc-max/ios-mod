@@ -20,5 +20,5 @@ jobs:
       - name: Upload built dylib
         uses: actions/upload-artifact@v4
         with:
-          name: Tweak
-          path: Tweak.dylib
+          name: mylib
+          path: mylib.dylib
