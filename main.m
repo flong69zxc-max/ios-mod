@@ -1,4 +1,4 @@
-// main.m - BlackRussia Hitbox x2 (АВТОПОИСК ОФФСЕТА)
+// main.m - BlackRussia Hitbox x2 (ПРАВИЛЬНЫЙ ОФФСЕТ)
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
@@ -7,7 +7,6 @@
 #import <stdint.h>
 #import <math.h>
 
-// Значения для патча
 static struct {
     float original;
     float patched;
@@ -27,7 +26,6 @@ static struct {
 #define HITBOX_COUNT 10
 #define HITBOX_STEP 0x20
 
-// Показывает алерт
 void showAlertNow(NSString *title, NSString *msg) {
     for (int attempt = 0; attempt < 20; attempt++) {
         __block BOOL shown = NO;
@@ -57,9 +55,25 @@ void showAlertNow(NSString *title, NSString *msg) {
     }
 }
 
-// Поиск первого хитбокса (0.15 за которым через 0x20 идёт 0.20)
-uintptr_t findHeadOffset(const struct mach_header *header, intptr_t slide) {
-    // Получаем границы памяти библиотеки
+// Получаем vmaddr первого сегмента (обычно __TEXT)
+uint64_t getBaseVMAddr(const struct mach_header *header) {
+    struct mach_header_64 *header64 = (struct mach_header_64 *)header;
+    struct load_command *lc = (struct load_command *)((char *)header64 + sizeof(struct mach_header_64));
+    
+    for (uint32_t i = 0; i < header64->ncmds; i++) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            struct segment_command_64 *seg = (struct segment_command_64 *)lc;
+            if (seg->vmaddr > 0) {
+                return seg->vmaddr; // Первый сегмент с ненулевым vmaddr
+            }
+        }
+        lc = (struct load_command *)((char *)lc + lc->cmdsize);
+    }
+    return 0;
+}
+
+// Поиск первого хитбокса
+uintptr_t findHeadAddr(const struct mach_header *header, intptr_t slide, uintptr_t *outLibStart, uintptr_t *outLibEnd) {
     uintptr_t libStart = 0;
     uintptr_t libEnd = 0;
     
@@ -77,40 +91,38 @@ uintptr_t findHeadOffset(const struct mach_header *header, intptr_t slide) {
         lc = (struct load_command *)((char *)lc + lc->cmdsize);
     }
     
-    // Сканируем каждый 4-й байт (выравнивание float)
+    *outLibStart = libStart;
+    *outLibEnd = libEnd;
+    
+    // Сканируем
     for (uintptr_t addr = libStart; addr < libEnd - (HITBOX_COUNT * HITBOX_STEP); addr += 4) {
         float v0 = *(float *)addr;
-        
-        // Проверяем первое значение — 0.15
         if (fabsf(v0 - 0.15f) > 0.001f) continue;
         
-        // Проверяем второе значение через 0x20 — должно быть 0.20
         float v1 = *(float *)(addr + HITBOX_STEP);
         if (fabsf(v1 - 0.20f) > 0.001f) continue;
         
-        // Проверяем третье значение ещё через 0x20 — должно быть 0.25
         float v2 = *(float *)(addr + (2 * HITBOX_STEP));
         if (fabsf(v2 - 0.25f) > 0.001f) continue;
         
-        // Нашли! Возвращаем оффсет от начала библиотеки
-        return addr - (uintptr_t)header;
+        return addr; // Реальный адрес в памяти
     }
     
-    return 0; // Не найдено
+    return 0;
 }
 
-// Основная логика
 void doPatch(void) {
-    // Ищем библиотеку
     uint32_t imageCount = _dyld_image_count();
     const struct mach_header *targetHeader = NULL;
     intptr_t targetSlide = 0;
+    const char *targetPath = NULL;
     
     for (uint32_t i = 0; i < imageCount; i++) {
         const char *name = _dyld_get_image_name(i);
         if (strstr(name, "blackrussia-client")) {
             targetHeader = _dyld_get_image_header(i);
             targetSlide = _dyld_get_image_vmaddr_slide(i);
+            targetPath = name;
             break;
         }
     }
@@ -120,16 +132,18 @@ void doPatch(void) {
         return;
     }
     
-    // Ищем оффсет
-    uintptr_t headOffset = findHeadOffset(targetHeader, targetSlide);
+    uintptr_t libStart = 0, libEnd = 0;
+    uintptr_t headAddr = findHeadAddr(targetHeader, targetSlide, &libStart, &libEnd);
     
-    if (headOffset == 0) {
-        showAlertNow(@"❌ Не найдено", @"Хитбоксы не найдены в памяти!");
+    if (headAddr == 0) {
+        showAlertNow(@"❌ Не найдено", 
+                     [NSString stringWithFormat:@"Диапазон поиска:\n0x%lx - 0x%lx", libStart, libEnd]);
         return;
     }
     
-    // Вычисляем реальный адрес
-    uintptr_t headAddr = (uintptr_t)targetHeader + headOffset;
+    // Правильный оффсет: от vmaddr первого сегмента
+    uint64_t baseVMAddr = getBaseVMAddr(targetHeader);
+    uintptr_t headOffset = headAddr - (uintptr_t)targetHeader + baseVMAddr;
     
     // Патчим
     kern_return_t kr = vm_protect(mach_task_self(),
@@ -139,7 +153,7 @@ void doPatch(void) {
                                   VM_PROT_READ | VM_PROT_WRITE);
     
     if (kr != KERN_SUCCESS) {
-        showAlertNow(@"❌ Ошибка", [NSString stringWithFormat:@"vm_protect: %d\nAddr: 0x%lx", kr, headAddr]);
+        showAlertNow(@"❌ Ошибка", [NSString stringWithFormat:@"vm_protect: %d", kr]);
         return;
     }
     
@@ -154,11 +168,11 @@ void doPatch(void) {
               FALSE,
               VM_PROT_READ);
     
-    // Показываем результат с адресом
     showAlertNow(@"✅ Успешно!",
                  [NSString stringWithFormat:
                   @"🎯 Адрес HEAD: 0x%lx\n"
-                  @"📌 Оффсет: 0x%lx\n\n"
+                  @"📌 Оффсет: 0x%lx\n"
+                  @"📦 База: 0x%lx\n\n"
                   @"HEAD:       0.15 → 0.30\n"
                   @"TORSO_1:    0.20 → 0.40\n"
                   @"TORSO_2:    0.25 → 0.50\n"
@@ -169,10 +183,9 @@ void doPatch(void) {
                   @"RIGHTLEG_1: 0.20 → 0.40\n"
                   @"LEFTLEG_2:  0.15 → 0.30\n"
                   @"RIGHTLEG_2: 0.15 → 0.30",
-                  headAddr, headOffset]);
+                  headAddr, headOffset, (uintptr_t)targetHeader]);
 }
 
-// Точка входа
 __attribute__((constructor))
 static void init(void) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 7 * NSEC_PER_SEC),
