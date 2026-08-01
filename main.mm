@@ -112,7 +112,69 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 5. Memory helpers с проверкой
+// 5. Показ уведомлений (перенесено ВВЕРХ, до использования)
+// ============================================================
+static void show_notification(NSString *title, NSString *subtitle) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIWindow *window = nil;
+        
+        if (@available(iOS 13.0, *)) {
+            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]]) {
+                    for (UIWindow *w in scene.windows) {
+                        if (w.isKeyWindow) {
+                            window = w;
+                            break;
+                        }
+                    }
+                    if (window) break;
+                }
+            }
+        }
+        
+        // Fallback для старых версий
+        if (!window) {
+            if (@available(iOS 13.0, *)) {
+                for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                    if ([scene isKindOfClass:[UIWindowScene class]]) {
+                        NSArray *windows = scene.windows;
+                        if (windows.count > 0) {
+                            window = windows.firstObject;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                // Используем старый API только для iOS < 13
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                NSArray *windows = [UIApplication sharedApplication].windows;
+                if (windows.count > 0) {
+                    window = windows.firstObject;
+                }
+                #pragma clang diagnostic pop
+            }
+        }
+        
+        UIViewController *rootVC = window.rootViewController;
+        
+        if (rootVC) {
+            UIAlertController *alert = [UIAlertController
+                alertControllerWithTitle:title
+                message:subtitle
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                      style:UIAlertActionStyleDefault
+                                                    handler:nil]];
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        } else {
+            NSLog(@"%@: %@", title, subtitle);
+        }
+    });
+}
+
+// ============================================================
+// 6. Memory helpers с проверкой
 // ============================================================
 static bool read_memory_safe(vm_address_t absoluteAddr, void *buffer, size_t size) {
     if (absoluteAddr == 0 || buffer == NULL || size == 0) return false;
@@ -138,7 +200,7 @@ static bool write_memory_safe(vm_address_t absoluteAddr, const void *buffer, siz
 }
 
 // ============================================================
-// 6. Поиск blackrussia-client.framework
+// 7. Поиск blackrussia-client.framework
 // ============================================================
 static vm_address_t find_blackrussia_framework(void) {
     write_log(@"");
@@ -219,7 +281,7 @@ static vm_address_t find_blackrussia_framework(void) {
 }
 
 // ============================================================
-// 7. Быстрый поиск хитбоксов в абсолютных адресах
+// 8. Быстрый поиск хитбоксов в абсолютных адресах
 // ============================================================
 static vm_address_t find_hitboxes_absolute(void) {
     write_log(@"");
@@ -352,7 +414,7 @@ static vm_address_t find_hitboxes_absolute(void) {
 }
 
 // ============================================================
-// 8. Патчинг хитбоксов (работаем с АБСОЛЮТНЫМИ адресами)
+// 9. Патчинг хитбоксов (работаем с АБСОЛЮТНЫМИ адресами)
 // ============================================================
 static bool patch_hitboxes_absolute(vm_address_t absoluteAddr) {
     write_log(@"");
@@ -415,7 +477,7 @@ static bool patch_hitboxes_absolute(vm_address_t absoluteAddr) {
 }
 
 // ============================================================
-// 9. Основная функция патчинга
+// 10. Основная функция патчинга
 // ============================================================
 static void patch_hitboxes(void) {
     std::lock_guard<std::mutex> lock(gPatchMutex);
@@ -487,63 +549,6 @@ static void patch_hitboxes(void) {
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
         show_notification(@"❌ Ошибка", @"Патч не удался. Проверьте логи.");
     }
-}
-
-// ============================================================
-// 10. Показ уведомлений
-// ============================================================
-static void show_notification(NSString *title, NSString *subtitle) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIWindow *window = nil;
-        
-        if (@available(iOS 13.0, *)) {
-            for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                if ([scene isKindOfClass:[UIWindowScene class]]) {
-                    for (UIWindow *w in scene.windows) {
-                        if (w.isKeyWindow) {
-                            window = w;
-                            break;
-                        }
-                    }
-                    if (window) break;
-                }
-            }
-        }
-        
-        if (!window) {
-            if (@available(iOS 13.0, *)) {
-                for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
-                    if ([scene isKindOfClass:[UIWindowScene class]]) {
-                        NSArray *windows = scene.windows;
-                        if (windows.count > 0) {
-                            window = windows.firstObject;
-                            break;
-                        }
-                    }
-                }
-            } else {
-                NSArray *windows = [UIApplication sharedApplication].windows;
-                if (windows.count > 0) {
-                    window = windows.firstObject;
-                }
-            }
-        }
-        
-        UIViewController *rootVC = window.rootViewController;
-        
-        if (rootVC) {
-            UIAlertController *alert = [UIAlertController
-                alertControllerWithTitle:title
-                message:subtitle
-                preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-                                                      style:UIAlertActionStyleDefault
-                                                    handler:nil]];
-            [rootVC presentViewController:alert animated:YES completion:nil];
-        } else {
-            NSLog(@"%@: %@", title, subtitle);
-        }
-    });
 }
 
 // ============================================================
