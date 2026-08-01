@@ -1,11 +1,12 @@
-// norelpatch.mm - v8.0 (direct binary patch)
+// norelpatch.mm - FINAL v11.0 (Works with br_anim.bpc)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <zlib.h>
 
 static bool isPatched = NO;
 static int retryCount = 0;
-static const int MAX_RETRIES = 5;
+static const int MAX_RETRIES = 10;
 static const int RETRY_DELAY = 3;
 
 static void write_log(NSString *format, ...) {
@@ -65,36 +66,9 @@ static void hex_dump(NSData *data, NSRange range) {
     }
 }
 
-static void patch_bpc_file(NSString *filePath) {
-    write_log(@"");
-    write_log(@"═══════════════════════════════════════════════════════════════");
-    write_log(@"📁 PATCHING: %@", filePath.lastPathComponent);
-    write_log(@"📂 PATH: %@", filePath);
-    
-    NSFileManager *fm = [NSFileManager defaultManager];
-    
-    if (![fm fileExistsAtPath:filePath]) {
-        write_log(@"❌ FILE NOT FOUND!");
-        return;
-    }
-    
-    NSData *data = [NSData dataWithContentsOfFile:filePath];
-    if (!data) {
-        write_log(@"❌ CAN'T READ FILE!");
-        return;
-    }
-    
-    write_log(@"📊 FILE SIZE: %lu bytes", (unsigned long)data.length);
-    
-    // Бэкап
-    NSString *backupPath = [filePath stringByAppendingString:@".original"];
-    if (![fm fileExistsAtPath:backupPath]) {
-        [data writeToFile:backupPath atomically:YES];
-        write_log(@"💾 Backup: %@", backupPath.lastPathComponent);
-    }
-    
+static NSData* patch_reload_strings(NSData *data, NSString *fileName) {
     NSMutableData *newData = [data mutableCopy];
-    int totalPatched = 0;
+    int patched = 0;
     
     NSArray *searchStrings = @[
         @"python_reload",
@@ -106,34 +80,20 @@ static void patch_bpc_file(NSString *filePath) {
     for (NSString *search in searchStrings) {
         NSData *searchData = [search dataUsingEncoding:NSUTF8StringEncoding];
         NSRange searchRange = NSMakeRange(0, data.length);
-        int found = 0;
         
         while (searchRange.location < data.length) {
             NSRange range = [data rangeOfData:searchData options:0 range:searchRange];
             if (range.location == NSNotFound) break;
             
-            found++;
             write_log(@"");
-            write_log(@"🔍 Found '%@' #%d at offset 0x%08lX", search, found, (unsigned long)range.location);
+            write_log(@"🔍 Found '%@' in %@ at offset 0x%08lX", search, fileName, (unsigned long)range.location);
             
-            // Контекст
-            NSUInteger start = range.location > 16 ? range.location - 16 : 0;
-            NSUInteger end = range.location + range.length + 16;
-            if (end > data.length) end = data.length;
-            NSRange contextRange = NSMakeRange(start, end - start);
-            
-            write_log(@"   Context (hex):");
-            hex_dump(data, contextRange);
-            
-            // Заменяем на idle
             NSString *replace = [search stringByReplacingOccurrencesOfString:@"_reload" withString:@"_idle"];
             NSData *replaceData = [replace dataUsingEncoding:NSUTF8StringEncoding];
             
-            // Проверка длины
             if (replaceData.length != range.length) {
                 if (replaceData.length > range.length) {
                     replaceData = [replaceData subdataWithRange:NSMakeRange(0, range.length)];
-                    write_log(@"   📏 Truncated to %lu bytes", (unsigned long)replaceData.length);
                 } else {
                     NSMutableData *padded = [NSMutableData dataWithData:replaceData];
                     uint8_t zero = 0;
@@ -141,72 +101,141 @@ static void patch_bpc_file(NSString *filePath) {
                         [padded appendBytes:&zero length:1];
                     }
                     replaceData = padded;
-                    write_log(@"   📏 Padded to %lu bytes", (unsigned long)replaceData.length);
                 }
             }
             
             [newData replaceBytesInRange:range withBytes:replaceData.bytes length:replaceData.length];
-            write_log(@"   ✅ Replaced '%@' with '%@'", search, replace);
-            totalPatched++;
+            write_log(@"   ✅ Replaced with '%@'", replace);
+            patched++;
             
             searchRange.location = range.location + range.length;
         }
-        
-        if (found > 0) {
-            write_log(@"📊 Found '%@' %d time(s)", search, found);
-        } else {
-            write_log(@"ℹ️ '%@' not found", search);
-        }
     }
     
-    if (totalPatched > 0) {
-        write_log(@"");
-        write_log(@"─────────────────────────────────────────────────────────────");
-        write_log(@"📊 Total patches: %d", totalPatched);
-        
-        NSError *error = nil;
-        [newData writeToFile:filePath options:NSDataWritingAtomic error:&error];
-        
-        if (error) {
-            write_log(@"❌ Write error: %@", error);
-        } else {
-            write_log(@"✅ File saved!");
+    if (patched > 0) {
+        write_log(@"📊 Patched %d string(s) in %@", patched, fileName);
+        return newData;
+    }
+    return nil;
+}
+
+static void patch_zip_archive(NSString *zipPath) {
+    write_log(@"");
+    write_log(@"═══════════════════════════════════════════════════════════════");
+    write_log(@"📦 Processing: %@", zipPath.lastPathComponent);
+    
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
+    if (![fm fileExistsAtPath:zipPath]) {
+        write_log(@"❌ File not found!");
+        return;
+    }
+    
+    // Бэкап
+    NSString *backupPath = [zipPath stringByAppendingString:@".original"];
+    if (![fm fileExistsAtPath:backupPath]) {
+        NSData *origData = [NSData dataWithContentsOfFile:zipPath];
+        [origData writeToFile:backupPath atomically:YES];
+        write_log(@"💾 Backup created");
+    }
+    
+    NSData *zipData = [NSData dataWithContentsOfFile:zipPath];
+    if (!zipData) {
+        write_log(@"❌ Can't read file");
+        return;
+    }
+    
+    write_log(@"📊 ZIP size: %lu bytes", (unsigned long)zipData.length);
+    
+    // Создаем временную папку
+    NSString *tempDir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"bpc_extract"];
+    [fm removeItemAtPath:tempDir error:nil];
+    [fm createDirectoryAtPath:tempDir withIntermediateDirectories:YES attributes:nil error:nil];
+    write_log(@"📂 Temp dir: %@", tempDir);
+    
+    // Распаковываем через unzip (единственный рабочий способ на iOS)
+    const char *zipPathC = [zipPath UTF8String];
+    const char *tempDirC = [tempDir UTF8String];
+    
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "unzip -o '%s' -d '%s' 2>/dev/null", zipPathC, tempDirC);
+    int result = system(cmd);
+    
+    if (result != 0) {
+        write_log(@"⚠️ Unzip returned: %d", result);
+    }
+    
+    // Ищем .ani файлы
+    NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:tempDir];
+    NSString *file;
+    int found = 0;
+    int patched = 0;
+    
+    while ((file = [enumerator nextObject])) {
+        if ([file hasSuffix:@".ani"]) {
+            NSString *aniPath = [tempDir stringByAppendingPathComponent:file];
+            found++;
             
-            // Верификация
-            NSData *verifyData = [NSData dataWithContentsOfFile:filePath];
-            if (verifyData) {
-                BOOL stillExists = NO;
-                for (NSString *search in searchStrings) {
-                    NSData *searchData = [search dataUsingEncoding:NSUTF8StringEncoding];
-                    NSRange verifyRange = [verifyData rangeOfData:searchData options:0 range:NSMakeRange(0, verifyData.length)];
-                    if (verifyRange.location != NSNotFound) {
-                        write_log(@"⚠️ '%@' STILL EXISTS at offset 0x%08lX!", search, (unsigned long)verifyRange.location);
-                        stillExists = YES;
-                    }
-                }
-                if (!stillExists) {
-                    write_log(@"✅ All strings successfully removed!");
-                    isPatched = YES;
+            write_log(@"");
+            write_log(@"📁 Found: %@", file);
+            
+            NSData *data = [NSData dataWithContentsOfFile:aniPath];
+            if (data) {
+                NSData *patchedData = patch_reload_strings(data, file);
+                if (patchedData) {
+                    [patchedData writeToFile:aniPath atomically:YES];
+                    write_log(@"✅ Saved");
+                    patched++;
                 }
             }
         }
-    } else {
-        write_log(@"");
-        write_log(@"⚠️ NOTHING PATCHED!");
     }
     
+    write_log(@"📊 Found %d .ani files, patched %d", found, patched);
+    
+    if (patched == 0) {
+        write_log(@"⚠️ Nothing to patch!");
+        [fm removeItemAtPath:tempDir error:nil];
+        return;
+    }
+    
+    // Запаковываем обратно
+    write_log(@"");
+    write_log(@"📦 Repacking ZIP...");
+    
+    snprintf(cmd, sizeof(cmd), "cd '%s' && zip -r ../br_anim_new.bpc . 2>/dev/null", tempDirC);
+    result = system(cmd);
+    
+    if (result != 0) {
+        write_log(@"⚠️ Zip returned: %d", result);
+    }
+    
+    // Заменяем оригинал
+    NSString *newZipPath = [[tempDir stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"br_anim_new.bpc"];
+    if ([fm fileExistsAtPath:newZipPath]) {
+        [fm removeItemAtPath:zipPath error:nil];
+        [fm moveItemAtPath:newZipPath toPath:zipPath error:nil];
+        write_log(@"✅ Replaced original");
+        isPatched = YES;
+    } else {
+        write_log(@"❌ New ZIP not created!");
+    }
+    
+    // Чистим
+    [fm removeItemAtPath:tempDir error:nil];
+    write_log(@"🧹 Cleaned up");
     write_log(@"═══════════════════════════════════════════════════════════════");
 }
 
-static void find_and_patch_bpc(void) {
+static void find_and_patch(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    
     NSArray *searchPaths = @[
         @"/var/mobile/Containers/Data/Application",
         [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject],
         [NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES) firstObject],
         [[NSBundle mainBundle] bundlePath]
     ];
-    
-    NSFileManager *fm = [NSFileManager defaultManager];
     
     for (NSString *basePath in searchPaths) {
         if (![fm fileExistsAtPath:basePath]) continue;
@@ -215,15 +244,11 @@ static void find_and_patch_bpc(void) {
         NSString *file;
         
         while ((file = [enumerator nextObject])) {
-            if (![file hasSuffix:@"br_anim.bpc"]) continue;
-            
-            NSString *fullPath = [basePath stringByAppendingPathComponent:file];
-            write_log(@"");
-            write_log(@"📦 Found: %@", fullPath);
-            patch_bpc_file(fullPath);
-            
-            if (isPatched) {
-                write_log(@"✅ Done!");
+            if ([file isEqualToString:@"br_anim.bpc"]) {
+                NSString *fullPath = [basePath stringByAppendingPathComponent:file];
+                write_log(@"");
+                write_log(@"✅ Found: %@", fullPath);
+                patch_zip_archive(fullPath);
                 return;
             }
         }
@@ -241,12 +266,14 @@ static void patch_all(void) {
         
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════════╗");
-        write_log(@"║  🔥 NO RELOAD PATCHER v8.0                                 ║");
-        write_log(@"║  ✅ Direct binary patch in br_anim.bpc                      ║");
+        write_log(@"║  🔥 NO RELOAD PATCHER v11.0                                ║");
+        write_log(@"║  ✅ Extracts br_anim.bpc (ZIP)                             ║");
+        write_log(@"║  ✅ Patches .ani files inside                              ║");
+        write_log(@"║  ✅ Repacks ZIP                                            ║");
         write_log(@"╚═══════════════════════════════════════════════════════════════╝");
         write_log(@"");
         
-        find_and_patch_bpc();
+        find_and_patch();
     }
 }
 
@@ -254,7 +281,7 @@ static void patch_with_retry(void) {
     retryCount++;
     
     if (retryCount > MAX_RETRIES) {
-        write_log(@"❌ MAX RETRIES (%d) REACHED", MAX_RETRIES);
+        write_log(@"❌ MAX RETRIES REACHED");
         return;
     }
     
@@ -272,7 +299,7 @@ static void patch_with_retry(void) {
 
 __attribute__((constructor))
 static void init(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         @try {
             patch_with_retry();
