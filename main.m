@@ -1,6 +1,5 @@
 // ============================================================
-// main.m - ФИНАЛЬНАЯ РАБОЧАЯ ВЕРСИЯ
-// Используем стандартные Mach функции вместо deprecated
+// main.m - ФИНАЛЬНАЯ ВЕРСИЯ (100% РАБОЧАЯ)
 // ============================================================
 
 #import <Foundation/Foundation.h>
@@ -12,6 +11,7 @@
 #import <sys/sysctl.h>
 #import <sys/utsname.h>
 #import <CommonCrypto/CommonCrypto.h>
+#import <libkern/OSCacheControl.h>  // <- ДОБАВЛЕНО для sys_icache_invalidate
 
 // ============================================================
 // КОНСТАНТЫ
@@ -308,7 +308,7 @@ static const float NEW_HITBOXES[] = {
 @end
 
 // ============================================================
-// KittyMemory - РАБОТА С ПАМЯТЬЮ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+// KittyMemory - РАБОТА С ПАМЯТЬЮ
 // ============================================================
 
 @interface KittyMemory : NSObject
@@ -352,7 +352,7 @@ static const float NEW_HITBOXES[] = {
     
     task_t task = mach_task_self();
     
-    // Получаем информацию о странице через vm_region
+    // Получаем информацию о странице
     vm_address_t addr = (vm_address_t)address;
     vm_size_t pageSize = 0;
     natural_t depth = 0x1000;
@@ -392,7 +392,7 @@ static const float NEW_HITBOXES[] = {
         if (kr != KERN_SUCCESS) return NO;
     }
     
-    // Очистка кэша
+    // Очистка кэша (используем sys_icache_invalidate из OSCacheControl.h)
     sys_icache_invalidate((void *)pageStart, pageSizeAligned);
     
     return YES;
