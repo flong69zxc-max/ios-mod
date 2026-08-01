@@ -206,20 +206,34 @@ static int patch(const char *path) {
     return 0;
 }
 
+static void findAndPatch(void) {
+    const char *paths[] = {
+        "BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
+        "Payload/BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
+        "blackrussia-client.framework/blackrussia-client",
+        "blackrussia-client",
+        NULL
+    };
+    
+    for (int i = 0; paths[i] != NULL; i++) {
+        if (access(paths[i], F_OK) == 0) {
+            logMsg("INFO", "Файл найден");
+            patch(paths[i]);
+            return;
+        }
+    }
+    
+    logMsg("ERROR", "Файл не найден ни по одному пути");
+    notify("❌ ОШИБКА", "Файл не найден\nПроверь пути в логе");
+}
+
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         printf("\n═══════════════════════════════════════════════\n");
         printf("   HITBOX PATCHER v3.0\n");
         printf("═══════════════════════════════════════════════\n\n");
         
-        const char *path = "Payload/BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client";
-        
-        if (access(path, F_OK) == 0) {
-            patch(path);
-        } else {
-            logMsg("ERROR", "Файл не найден");
-            notify("❌ ОШИБКА", "Файл не найден\nPayload/BrBase.app/Frameworks/\nblackrussia-client.framework/\nblackrussia-client");
-        }
+        findAndPatch();
         
         printf("\n═══════════════════════════════════════════════\n");
         printf("📁 Лог: Загрузки/hitbox_patch.log\n");
