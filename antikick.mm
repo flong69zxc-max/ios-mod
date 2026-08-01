@@ -1,11 +1,11 @@
-// antikick.mm - Lightweight Anti-Suspend
+// antikick.mm - Fixed version
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <mach/mach.h>
-#import <pthread.h>
 
 static bool gRunning = true;
+static UIBackgroundTaskIdentifier gBgTask = UIBackgroundTaskInvalid;
 
 static void write_log(NSString *format, ...) {
     @autoreleasepool {
@@ -39,60 +39,58 @@ static void write_log(NSString *format, ...) {
     }
 }
 
-// Только фоновые задачи, без бесконечного цикла
 static void register_background_task(void) {
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     
     UIApplication *app = [UIApplication sharedApplication];
     
-    UIBackgroundTaskIdentifier bgTask = [app beginBackgroundTaskWithName:@"KeepAlive" 
-                                                       expirationHandler:^{
-        // Если истекает - просто перерегистрируем
-        [app endBackgroundTask:bgTask];
-        register_background_task();
+    // Закрываем старую задачу если есть
+    if (gBgTask != UIBackgroundTaskInvalid) {
+        [app endBackgroundTask:gBgTask];
+        gBgTask = UIBackgroundTaskInvalid;
+    }
+    
+    // Регистрируем новую
+    gBgTask = [app beginBackgroundTaskWithName:@"KeepAlive" 
+                             expirationHandler:^{
+        // Если истекает - закрываем и перерегистрируем
+        if (gBgTask != UIBackgroundTaskInvalid) {
+            [app endBackgroundTask:gBgTask];
+            gBgTask = UIBackgroundTaskInvalid;
+        }
+        // Перерегистрируем через 1 секунду
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            register_background_task();
+        });
     }];
     
     #pragma clang diagnostic pop
     
-    write_log(@"Background task registered: %lu", (unsigned long)bgTask);
+    write_log(@"Background task: %lu", (unsigned long)gBgTask);
 }
 
-// Лёгкий таймер вместо бесконечного цикла
-static void keep_alive_timer(void) {
-    // Просто тикает каждые 5 секунд
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{
-        if (gRunning) {
-            write_log(@"Keep-alive tick");
-            register_background_task();
-            keep_alive_timer();
-        }
-    });
-}
-
+// Только регистрируем задачу, без бесконечных таймеров
 static void init_anti_kick(void) {
     write_log(@"");
-    write_log(@"ANTI-KICK LITE INITIALIZED");
+    write_log(@"ANTI-KICK INITIALIZED");
     
-    // Отключаем режим ожидания (безопасно)
+    // Отключаем режим ожидания
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     [[UIApplication sharedApplication] setIdleTimerDisabled:YES];
     #pragma clang diagnostic pop
     
-    // Регистрируем фоновую задачу
+    // Регистрируем одну задачу
     register_background_task();
-    
-    // Запускаем таймер
-    keep_alive_timer();
     
     // Слушаем уведомления
     [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
                                                        object:nil
                                                         queue:[NSOperationQueue mainQueue]
                                                    usingBlock:^(NSNotification *note) {
-        write_log(@"Background - refreshing task");
+        write_log(@"Background - refresh");
         register_background_task();
     }];
     
@@ -100,10 +98,18 @@ static void init_anti_kick(void) {
                                                        object:nil
                                                         queue:[NSOperationQueue mainQueue]
                                                    usingBlock:^(NSNotification *note) {
-        write_log(@"Foreground - all good");
+        write_log(@"Foreground");
+        // Закрываем фоновую задачу при возврате
+        if (gBgTask != UIBackgroundTaskInvalid) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [[UIApplication sharedApplication] endBackgroundTask:gBgTask];
+            #pragma clang diagnostic pop
+            gBgTask = UIBackgroundTaskInvalid;
+        }
     }];
     
-    write_log(@"ANTI-KICK ACTIVE (lite mode)");
+    write_log(@"ANTI-KICK ACTIVE");
     write_log(@"");
 }
 
@@ -114,7 +120,7 @@ static void inject(void) {
         @try {
             init_anti_kick();
         } @catch (NSException *e) {
-            write_log(@"Anti-kick error: %@", e);
+            write_log(@"Error: %@", e);
         }
     });
 }
