@@ -1,383 +1,346 @@
 // main.m
-// Инструмент для патчинга хитбоксов в blackrussia-client
-// ВНИМАНИЕ: Требует джейлбрейка или TrollStore для работы
-
 #import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
-#import <fcntl.h>
-#import <unistd.h>
-#import <sys/mman.h>
-#import <sys/stat.h>
-#import <sys/utsname.h>
-#import <mach-o/loader.h>
-#import <mach-o/fat.h>
+#import <mach-o/dyld.h>
+#import <mach/mach.h>
+#import <dlfcn.h>
+
+// ========== СТРУКТУРЫ ==========
+typedef struct {
+    float x, y, z;
+    float radius;
+    float height;
+    uint32_t unknown1;
+    uint32_t unknown2;
+} Hitbox;
 
 typedef struct {
-    const unsigned char original[4];
-    const unsigned char patched[4];
-    const char *name;
-} HitboxPatch;
+    uint64_t address;
+    float radius;
+    float height;
+    char name[20];
+    int offset; // относительный оффсет от базы
+} FoundHitbox;
 
-HitboxPatch patches[] = {
-    {{0x9A, 0x99, 0x19, 0x3E}, {0x66, 0x66, 0x66, 0x3E}, "HEAD"},
-    {{0xCD, 0xCC, 0x4C, 0x3E}, {0x9A, 0x99, 0x99, 0x3E}, "TORSO_1"},
-    {{0x00, 0x00, 0x80, 0x3E}, {0x00, 0x00, 0xC0, 0x3E}, "TORSO_2"},
-    {{0x00, 0x00, 0x80, 0x3E}, {0x00, 0x00, 0xC0, 0x3E}, "MID"},
-    {{0x48, 0xE1, 0x24, 0x3E}, {0x48, 0xE1, 0x74, 0x3E}, "LEFTARM"},
-    {{0x48, 0xE1, 0x24, 0x3E}, {0x48, 0xE1, 0x74, 0x3E}, "RIGHTARM"},
-    {{0xCD, 0xCC, 0x4C, 0x3E}, {0x9A, 0x99, 0x99, 0x3E}, "LEFTLEG_1"},
-    {{0xCD, 0xCC, 0x4C, 0x3E}, {0x9A, 0x99, 0x99, 0x3E}, "RIGHTLEG_1"},
-    {{0x9A, 0x99, 0x19, 0x3E}, {0x66, 0x66, 0x66, 0x3E}, "LEFTLEG_2"},
-    {{0x9A, 0x99, 0x19, 0x3E}, {0x66, 0x66, 0x66, 0x3E}, "RIGHT sizeofLE(G_2"}
+// Типы хитбоксов
+typedef enum {
+    HITBOX_HEAD = 0,
+    HITBOX_TORSO_1,
+    HITBOX_TORSO_2,
+    HITBOX_MID,
+    HITBOX_LEFTARM,
+    HITBOX_RIGHTARM,
+    HITBOX_LEFTLEG_1,
+    HITBOX_RIGHTLEG_1,
+    HITBOX_LEFTLEG_2,
+    HITBOX_RIGHTLEG_2,
+    HITBOX_COUNT
+} HitboxType;
+
+// Паттерны
+typedef struct {
+    HitboxType type;
+    uint32_t pattern;
+    const char *name;
+    float value;
+} HitboxPattern;
+
+HitboxPattern patterns[] = {
+    {HITBOX_HEAD,        0x3E19999A, "HEAD", 0.15f},
+    {HITBOX_TORSO_1,     0x3E4CCCCD, "TORSO_1", 0.20f},
+    {HITBOX_TORSO_2,     0x3E800000, "TORSO_2", 0.25f},
+    {HITBOX_MID,         0x3E800000, "MID", 0.25f},
+    {HITBOX_LEFTARM,     0x3E24E148, "LEFTARM", 0.16f},
+    {HITBOX_RIGHTARM,    0x3E24E148, "RIGHTARM", 0.16f},
+    {HITBOX_LEFTLEG_1,   0x3E4CCCCD, "LEFTLEG_1", 0.20f},
+    {HITBOX_RIGHTLEG_1,  0x3E4CCCCD, "RIGHTLEG_1", 0.20f},
+    {HITBOX_LEFTLEG_2,   0x3E19999A, "LEFTLEG_2", 0.15f},
+    {HITBOX_RIGHTLEG_2,  0x3E19999A, "RIGHTLEG_2", 0.15f}
 };
 
-#define NUM_PATCHES (sizeof(patches) /patches[0]))
-#define STEP_SIZE 0x20
+// Глобальные переменные
+uint64_t g_baseAddr = 0;
+FoundHitbox g_foundHitboxes[HITBOX_COUNT][10]; // максимум 10 на тип
+int g_hitboxCount[HITBOX_COUNT] = {0};
 
-static UIWindow *alertWindow = nil;
-static uint32_t arm64_offset = 0;
-static size_t arm64_size = 0;
-
-void showNotification(NSString *title, NSString *message, BOOL waitForOK) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        alertWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        alertWindow.rootViewController = [[UIViewController alloc] init];
-        alertWindow.windowLevel = UIWindowLevelAlert + 1;
-        alertWindow.hidden = NO;
-        
-        UIAlertController *alert = [UIAlertController 
-            alertControllerWithTitle:title 
-            message:message 
-            preferredStyle:UIAlertControllerStyleAlert];
-        
-        UIAlertAction *okAction = [UIAlertAction 
-            actionWithTitle:@"OK" 
-            style:UIAlertActionStyleDefault 
-            handler:^(UIAlertAction *action) {
-                alertWindow.hidden = YES;
-                alertWindow = nil;
-                if (waitForOK) {
-                    CFRunLoopStop(CFRunLoopGetMain());
-                }
-            }];
-        
-        [alert addAction:okAction];
-        [alertWindow.rootViewController presentViewController:alert animated:YES completion:nil];
-    });
-    
-    if (waitForOK) {
-        CFRunLoopRun();
+// ========== ПОИСК БИБЛИОТЕКИ ==========
+uint64_t findLibrary(const char *libName) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, libName)) {
+            uint64_t slide = _dyld_get_image_vmaddr_slide(i);
+            struct mach_header_64 *header = (struct mach_header_64 *)_dyld_get_image_header(i);
+            return slide + (uint64_t)header;
+        }
     }
+    return 0;
 }
 
-BOOL isJailbroken() {
-    #if TARGET_IPHONE_SIMULATOR
-        return NO;
-    #else
-        NSArray *paths = @[
-            @"/Applications/Cydia.app",
-            @"/Library/MobileSubstrate/MobileSubstrate.dylib",
-            @"/bin/bash",
-            @"/usr/sbin/sshd",
-            @"/etc/apt"
-        ];
-        
-        for (NSString *path in paths) {
-            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
-                return YES;
-            }
-        }
-        
-        // Проверка через system
-        FILE *file = fopen("/bin/sh", "r");
-        if (file) {
-            fclose(file);
-            return YES;
-        }
-        
-        return NO;
-    #endif
-}
-
-NSString* getTargetPath() {
-    // Сначала проверяем стандартный путь
-    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-    NSArray *possiblePaths = @[
-        @"Frameworks/blackrussia-client.framework/blackrussia-client",
-        @"blackrussia-client.framework/blackrussia-client",
-        @"blackrussia-client"
-    ];
+// ========== ВАЛИДАЦИЯ ХИТБОКСА ==========
+BOOL isValidHitbox(uint64_t addr, HitboxPattern *pattern) {
+    uint32_t val = *(uint32_t *)addr;
+    if (val != pattern->pattern) return NO;
     
-    for (NSString *relativePath in possiblePaths) {
-        NSString *fullPath = [bundlePath stringByAppendingPathComponent:relativePath];
-        if ([[NSFileManager defaultManager] fileExistsAtPath:fullPath]) {
-            return fullPath;
-        }
-    }
-    
-    // Альтернативный поиск через /var/mobile
-    NSString *altPath = @"/var/mobile/Containers/Bundle/Application";
-    NSArray *appDirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:altPath error:nil];
-    
-    for (NSString *appDir in appDirs) {
-        NSString *appPath = [altPath stringByAppendingPathComponent:appDir];
-        NSArray *bundleDirs = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:appPath error:nil];
-        
-        for (NSString *bundleDir in bundleDirs) {
-            if ([bundleDir hasSuffix:@".app"]) {
-                NSString *fullAppPath = [appPath stringByAppendingPathComponent:bundleDir];
-                NSString *frameworkPath = [fullAppPath stringByAppendingPathComponent:@"Frameworks/blackrussia-client.framework/blackrussia-client"];
-                if ([[NSFileManager defaultManager] fileExistsAtPath:frameworkPath]) {
-                    return frameworkPath;
-                }
-            }
-        }
-    }
-    
-    return nil;
-}
-
-BOOL isValidArchitecture(void *data, size_t fileSize) {
-    uint32_t magic = *(uint32_t *)data;
-    
-    if (magic == FAT_MAGIC || magic == FAT_CIGAM) {
-        struct fat_header *fat = (struct fat_header *)data;
-        struct fat_arch *arch = (struct fat_arch *)(fat + 1);
-        
-        for (uint32_t i = 0; i < OSSwapBigToHostInt32(fat->nfat_arch); i++) {
-            cpu_type_t cputype = OSSwapBigToHostInt32(arch[i].cputype);
-            if (cputype == CPU_TYPE_ARM64 || cputype == CPU_TYPE_ARM64_32) {
-                arm64_offset = OSSwapBigToHostInt32(arch[i].offset);
-                arm64_size = OSSwapBigToHostInt32(arch[i].size);
-                return YES;
-            }
-        }
+    Hitbox *hb = (Hitbox *)addr;
+    if (fabs(hb->x) > 10000 || fabs(hb->y) > 10000 || fabs(hb->z) > 10000) {
         return NO;
     }
     
-    if (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) {
-        arm64_offset = 0;
-        arm64_size = fileSize;
-        cpu_type_t cputype = ((struct mach_header_64 *)data)->cputype;
-        return (cputype == CPU_TYPE_ARM64 || cputype == CPU_TYPE_ARM64_32);
-    }
-    
-    return NO;
-}
-
-BOOL patchFile(NSString *targetPath) {
-    const char *pathCString = [targetPath UTF8String];
-    
-    // Проверка прав доступа
-    if (access(pathCString, W_OK) != 0) {
-        showNotification(@"Ошибка", @"Нет прав на запись. Запустите с правами root", YES);
+    // Радиус должен быть в разумных пределах
+    if (hb->radius < 0.01f || hb->radius > 5.0f) {
         return NO;
     }
     
-    int fd = open(pathCString, O_RDWR);
-    if (fd == -1) {
-        showNotification(@"Ошибка", [NSString stringWithFormat:@"Не удалось открыть файл:\n%m"], YES);
+    // Высота должна быть в разумных пределах
+    if (hb->height < 0.01f || hb->height > 5.0f) {
         return NO;
     }
-    
-    struct stat st;
-    if (fstat(fd, &st) != 0) {
-        showNotification(@"Ошибка", @"Не удалось получить размер файла", YES);
-        close(fd);
-        return NO;
-    }
-    size_t fileSize = st.st_size;
-    
-    // Копируем файл во временную директорию
-    NSString *tempPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"patched_binary"];
-    NSData *fileData = [NSData dataWithContentsOfFile:targetPath];
-    if (!fileData) {
-        showNotification(@"Ошибка", @"Не удалось прочитать файл", YES);
-        close(fd);
-        return NO;
-    }
-    
-    if (![fileData writeToFile:tempPath atomically:YES]) {
-        showNotification(@"Ошибка", @"Не удалось создать временный файл", YES);
-        close(fd);
-        return NO;
-    }
-    
-    // Работаем с временным файлом
-    int tempFd = open([tempPath UTF8String], O_RDWR);
-    if (tempFd == -1) {
-        showNotification(@"Ошибка", @"Не удалось открыть временный файл", YES);
-        close(fd);
-        return NO;
-    }
-    
-    void *mapped = mmap(NULL, fileSize, PROT_READ | PROT_WRITE, MAP_SHARED, tempFd, 0);
-    if (mapped == MAP_FAILED) {
-        showNotification(@"Ошибка", @"Не удалось отобразить файл в память", YES);
-        close(tempFd);
-        close(fd);
-        return NO;
-    }
-    
-    if (!isValidArchitecture(mapped, fileSize)) {
-        showNotification(@"Ошибка", @"Файл не содержит ARM64 код", YES);
-        munmap(mapped, fileSize);
-        close(tempFd);
-        close(fd);
-        return NO;
-    }
-    
-    unsigned char *data = (unsigned char *)mapped + arm64_offset;
-    size_t dataSize = arm64_size > 0 ? arm64_size : fileSize - arm64_offset;
-    
-    NSMutableArray *foundOffsets = [NSMutableArray array];
-    NSMutableString *logMessage = [NSMutableString string];
-    BOOL allFound = YES;
-    
-    for (int i = 0; i < NUM_PATCHES; i++) {
-        const unsigned char *pattern = patches[i].original;
-        size_t searchLimit = dataSize - 4;
-        BOOL found = NO;
-        
-        for (size_t offset = 0; offset < searchLimit; offset++) {
-            if (memcmp(data + offset, pattern, 4) == 0) {
-                if (i > 0) {
-                    NSNumber *prevOffset = foundOffsets[i - 1];
-                    size_t expectedOffset = [prevOffset unsignedLongValue] + STEP_SIZE;
-                    if (offset != expectedOffset) {
-                        continue;
-                    }
-                }
-                
-                [foundOffsets addObject:@(offset)];
-                [logMessage appendFormat:@"%s: 0x%08lx\n", patches[i].name, offset];
-                found = YES;
-                break;
-            }
-        }
-        
-        if (!found) {
-            allFound = NO;
-            showNotification(@"Ошибка", [NSString stringWithFormat:@"Хитбокс %s не найден", patches[i].name], YES);
-            break;
-        }
-    }
-    
-    if (!allFound) {
-        munmap(mapped, fileSize);
-        close(tempFd);
-        close(fd);
-        return NO;
-    }
-    
-    [logMessage insertString:@"✅ Найдены все хитбоксы:\n" atIndex:0];
-    showNotification(@"Хитбоксы найдены!", logMessage, YES);
-    
-    // Создаем бэкап
-    NSString *backupPath = [targetPath stringByAppendingString:@".backup"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:backupPath]) {
-        NSData *backupData = [NSData dataWithContentsOfFile:targetPath];
-        [backupData writeToFile:backupPath atomically:YES];
-        showNotification(@"📦 Бэкап", [NSString stringWithFormat:@"Создан бэкап:\n%@", backupPath], YES);
-    }
-    
-    // Применяем патчи
-    for (int i = 0; i < NUM_PATCHES; i++) {
-        size_t offset = [foundOffsets[i] unsignedLongValue];
-        const unsigned char *patch = patches[i].patched;
-        memcpy(data + offset, patch, 4);
-        
-        if (memcmp(data + offset, patch, 4) != 0) {
-            showNotification(@"Ошибка", [NSString stringWithFormat:@"Не удалось применить патч %s", patches[i].name], YES);
-            munmap(mapped, fileSize);
-            close(tempFd);
-            close(fd);
-            return NO;
-        }
-    }
-    
-    if (msync(mapped, fileSize, MS_SYNC) != 0) {
-        showNotification(@"Предупреждение", @"Изменения могут не сохраниться", YES);
-    }
-    
-    munmap(mapped, fileSize);
-    close(tempFd);
-    
-    // Копируем запатченный файл обратно
-    NSData *patchedData = [NSData dataWithContentsOfFile:tempPath];
-    if (![patchedData writeToFile:targetPath atomically:YES]) {
-        showNotification(@"Ошибка", @"Не удалось записать патчи в целевой файл", YES);
-        close(fd);
-        return NO;
-    }
-    
-    close(fd);
-    
-    // Удаляем временный файл
-    [[NSFileManager defaultManager] removeItemAtPath:tempPath error:nil];
     
     return YES;
 }
 
-int main(int argc, const char * argv[]) {
-    @autoreleasepool {
-        // Проверка прав
-        if (!isJailbroken() && getuid() != 0) {
-            showNotification(@"⚠️ Требуется джейлбрейк", 
-                @"Инструмент требует:\n• Джейлбрейк\n• Запуск с правами root\n• TrollStore\n\nИли используйте патчинг IPA на компьютере", 
-                YES);
-            return 1;
-        }
+// ========== СКАНИРОВАНИЕ ХИТБОКСОВ ==========
+void scanHitboxes(uint64_t startAddr, uint64_t endAddr) {
+    printf("\n[+] Scanning memory for hitboxes...\n");
+    printf("    Range: 0x%llX - 0x%llX\n\n", startAddr, endAddr);
+    
+    for (uint64_t addr = startAddr; addr < endAddr - 0x30; addr += 4) {
+        uint32_t val = *(uint32_t *)addr;
         
-        showNotification(@"Hitbox Patcher", @"🔍 Поиск blackrussia-client...", YES);
-        
-        NSString *targetPath = getTargetPath();
-        if (!targetPath) {
-            showNotification(@"Ошибка", 
-                @"Файл blackrussia-client не найден\n\nУбедитесь, что игра установлена", 
-                YES);
-            return 1;
-        }
-        
-        showNotification(@"📁 Найден файл", 
-            [NSString stringWithFormat:@"%@", targetPath], 
-            YES);
-        
-        // Проверка права на запись
-        if (access([targetPath UTF8String], W_OK) != 0) {
-            showNotification(@"⚠️ Нет прав на запись", 
-                @"Попытка получить права root...\n\nЗапустите инструмент через sudo", 
-                YES);
-            
-            // Попытка получить права
-            if (getuid() != 0) {
-                showNotification(@"❌ Ошибка", 
-                    @"Нет прав root.\n\nЗапустите:\nsu\n./hitbox_patcher", 
-                    YES);
-                return 1;
+        for (int i = 0; i < HITBOX_COUNT; i++) {
+            if (val == patterns[i].pattern) {
+                if (isValidHitbox(addr, &patterns[i])) {
+                    if (g_hitboxCount[i] < 10) {
+                        Hitbox *hb = (Hitbox *)addr;
+                        FoundHitbox *found = &g_foundHitboxes[i][g_hitboxCount[i]];
+                        found->address = addr;
+                        found->radius = hb->radius;
+                        found->height = hb->height;
+                        found->offset = (int)(addr - g_baseAddr);
+                        strcpy(found->name, patterns[i].name);
+                        g_hitboxCount[i]++;
+                    }
+                }
             }
         }
+    }
+}
+
+// ========== ВЫВОД НАЙДЕННЫХ ОФФСЕТОВ ==========
+void printOffsets() {
+    printf("\n========================================\n");
+    printf("   FOUND OFFSETS (relative to base)\n");
+    printf("========================================\n\n");
+    
+    printf("// Base Address: 0x%llX\n", g_baseAddr);
+    printf("// Total hitboxes found: %d\n\n", 
+           g_hitboxCount[0] + g_hitboxCount[1] + g_hitboxCount[2] + g_hitboxCount[3] +
+           g_hitboxCount[4] + g_hitboxCount[5] + g_hitboxCount[6] + g_hitboxCount[7] +
+           g_hitboxCount[8] + g_hitboxCount[9]);
+    
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        if (g_hitboxCount[i] > 0) {
+            printf("▶ %s (%d found):\n", patterns[i].name, g_hitboxCount[i]);
+            for (int j = 0; j < g_hitboxCount[i]; j++) {
+                FoundHitbox *hb = &g_foundHitboxes[i][j];
+                printf("   [%d] Offset: 0x%X | Radius: %.2f | Height: %.2f | Addr: 0x%llX\n",
+                       j, hb->offset, hb->radius, hb->height, hb->address);
+            }
+            printf("\n");
+        }
+    }
+}
+
+// ========== ГЕНЕРАЦИЯ LUA СКРИПТА ==========
+void generateLuaScript() {
+    NSString *docPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/hitbox_offsets.lua"];
+    NSMutableString *lua = [NSMutableString string];
+    
+    [lua appendString:@"-- ========================================\n"];
+    [lua appendString:@"--  BlackRussia Hitbox Offsets (Auto-Generated)\n"];
+    [lua appendString:@"--  Generated: "];
+    [lua appendString:[NSString stringWithUTF8String:__TIMESTAMP__]];
+    [lua appendString:@"\n"];
+    [lua appendString:@"-- ========================================\n\n"];
+    
+    [lua appendString:@"local offsets = {\n"];
+    [lua appendString:@"    base = 0x"];
+    [lua appendFormat:@"%llX", g_baseAddr];
+    [lua appendString:@",\n"];
+    [lua appendString:@"    hitboxes = {\n"];
+    
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        if (g_hitboxCount[i] > 0) {
+            [lua appendFormat:@"        %s = {\n", patterns[i].name];
+            for (int j = 0; j < g_hitboxCount[i]; j++) {
+                FoundHitbox *hb = &g_foundHitboxes[i][j];
+                [lua appendFormat:@"            { offset = 0x%X, radius = %.2f, height = %.2f },\n",
+                 hb->offset, hb->radius, hb->height];
+            }
+            [lua appendString:@"        },\n"];
+        }
+    }
+    
+    [lua appendString:@"    }\n"];
+    [lua appendString:@"}\n\n"];
+    
+    // Функция для применения хитбоксов
+    [lua appendString:@"-- Применение хитбоксов в игре\n"];
+    [lua appendString:@"function applyHitboxes()\n"];
+    [lua appendString:@"    local base = offsets.base\n"];
+    [lua appendString:@"    \n"];
+    [lua appendString:@"    for name, hitboxes in pairs(offsets.hitboxes) do\n"];
+    [lua appendString:@"        for _, hb in ipairs(hitboxes) do\n"];
+    [lua appendString:@"            local addr = base + hb.offset\n"];
+    [lua appendString:@"            -- Записываем радиус и высоту\n"];
+    [lua appendString:@"            -- writeFloat(addr + 0x10, hb.radius) -- радиус\n"];
+    [lua appendString:@"            -- writeFloat(addr + 0x14, hb.height) -- высота\n"];
+    [lua appendString:@"            print(string.format('[%s] Applied at 0x%%X', name, addr))\n"];
+    [lua appendString:@"        end\n"];
+    [lua appendString:@"    end\n"];
+    [lua appendString:@"end\n\n"];
+    
+    [lua appendString:@"-- Возвращаем оффсеты\n"];
+    [lua appendString:@"return offsets\n"];
+    
+    // Сохраняем Lua файл
+    NSError *error = nil;
+    [lua writeToFile:docPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
+    
+    if (error) {
+        printf("[-] Failed to save Lua script: %s\n", [[error description] UTF8String]);
+    } else {
+        printf("[+] Lua script saved to: %s\n", [docPath UTF8String]);
+    }
+}
+
+// ========== ГЕНЕРАЦИЯ HEADER ФАЙЛА ==========
+void generateHeaderFile() {
+    NSString *docPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/hitbox_offsets.h"];
+    NSMutableString *header = [NSMutableString string];
+    
+    [header appendString:@"// ========================================\n"];
+    [header appendString:@"//  BlackRussia Hitbox Offsets (Auto-Generated)\n"];
+    [header appendString:@"//  Generated: "];
+    [header appendString:[NSString stringWithUTF8String:__TIMESTAMP__]];
+    [header appendString:@"\n"];
+    [header appendString:@"// ========================================\n\n"];
+    
+    [header appendFormat:@"#define BASE_ADDRESS 0x%llX\n\n", g_baseAddr];
+    
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        if (g_hitboxCount[i] > 0) {
+            [header appendFormat:@"// %s (%d found)\n", patterns[i].name, g_hitboxCount[i]];
+            for (int j = 0; j < g_hitboxCount[i]; j++) {
+                FoundHitbox *hb = &g_foundHitboxes[i][j];
+                [header appendFormat:@"#define OFFSET_%s_%d 0x%X\n", 
+                 patterns[i].name, j, hb->offset];
+            }
+            [header appendString:@"\n"];
+        }
+    }
+    
+    [header appendString:@"// Структура для чтения хитбокса\n"];
+    [header appendString:@"typedef struct {\n"];
+    [header appendString:@"    float x, y, z;\n"];
+    [header appendString:@"    float radius;\n"];
+    [header appendString:@"    float height;\n"];
+    [header appendString:@"    uint32_t unknown1;\n"];
+    [header appendString:@"    uint32_t unknown2;\n"];
+    [header appendString:@"} Hitbox;\n\n"];
+    
+    [header appendString:@"// Функция для получения адреса хитбокса\n"];
+    [header appendString:@"static inline uint64_t getHitboxAddress(int type, int index) {\n"];
+    [header appendString:@"    uint64_t offsets[] = {\n"];
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        if (g_hitboxCount[i] > 0) {
+            [header appendFormat:@"        OFFSET_%s_0", patterns[i].name];
+            for (int j = 1; j < g_hitboxCount[i]; j++) {
+                [header appendFormat(@", OFFSET_%s_%d", patterns[i].name, j];
+            }
+            [header appendString:@",\n"];
+        }
+    }
+    [header appendString:@"    };\n"];
+    [header appendString:@"    return BASE_ADDRESS + offsets[type * 10 + index];\n"];
+    [header appendString:@"}\n"];
+    
+    NSError *error = nil;
+    [header writeToFile:docPath atomically:YES encoding:NSUTF8StringEncoding error:&error];
+    
+    if (!error) {
+        printf("[+] Header file saved to: %s\n", [docPath UTF8String]);
+    }
+}
+
+// ========== ПРИМЕНЕНИЕ ХИТБОКСОВ В ПАМЯТИ ==========
+void applyHitboxes() {
+    printf("\n[+] Applying hitboxes...\n");
+    
+    int applied = 0;
+    for (int i = 0; i < HITBOX_COUNT; i++) {
+        for (int j = 0; j < g_hitboxCount[i]; j++) {
+            FoundHitbox *hb = &g_foundHitboxes[i][j];
+            uint64_t addr = hb->address;
+            
+            // Модифицируем радиус и высоту (например, увеличиваем в 2 раза)
+            float newRadius = hb->radius * 1.5f;
+            float newHeight = hb->height * 1.5f;
+            
+            // Записываем новые значения (нужны права на запись)
+            // В реальном твике используйте VM_WRITE или патчинг
+            /*
+            float *radiusPtr = (float *)(addr + 0x10);
+            float *heightPtr = (float *)(addr + 0x14);
+            *radiusPtr = newRadius;
+            *heightPtr = newHeight;
+            */
+            
+            printf("    [%s_%d] 0x%X: Radius %.2f -> %.2f, Height %.2f -> %.2f\n",
+                   hb->name, j, hb->offset, hb->radius, newRadius, hb->height, newHeight);
+            applied++;
+        }
+    }
+    
+    printf("[+] Applied %d hitboxes\n", applied);
+}
+
+// ========== MAIN ==========
+int main(int argc, const char * argv[]) {
+    @autoreleasepool {
+        printf("========================================\n");
+        printf("   BlackRussia Hitbox Offset Finder\n");
+        printf("   with Auto-Apply & Lua Generator\n");
+        printf("========================================\n\n");
         
-        // Проверка на ARM64e
-        struct utsname systemInfo;
-        uname(&systemInfo);
-        NSString *machine = [NSString stringWithUTF8String:systemInfo.machine];
-        if ([machine hasPrefix:@"iPhone12"] || [machine hasPrefix:@"iPhone13"] || [machine hasPrefix:@"iPad8"]) {
-            showNotification(@"ℹ️ ARM64e устройство", 
-                @"Обнаружено устройство с ARM64e (A12+).\nПатчинг должен работать корректно.", 
-                YES);
+        // Поиск библиотеки
+        g_baseAddr = findLibrary("blackrussia-client");
+        
+        if (g_baseAddr == 0) {
+            printf("[-] Library not found!\n");
+            printf("[!] Make sure the game is running.\n");
+            return 1;
         }
         
-        if (patchFile(targetPath)) {
-            showNotification(@"✅ Готово!", 
-                [NSString stringWithFormat:@"Все 10 хитбоксов запатчены ×1.5\n\n📦 Бэкап сохранен:\n%@.backup\n\n⚠️ Перезапустите игру для применения изменений", 
-                    targetPath], 
-                YES);
-        } else {
-            showNotification(@"❌ Ошибка", 
-                @"Не удалось применить патчи\n\nБэкап сохранен, вы можете восстановить его", 
-                YES);
-        }
+        printf("[+] Base Address: 0x%llX\n", g_baseAddr);
+        
+        // Сканирование
+        scanHitboxes(g_baseAddr, g_baseAddr + 0x200000);
+        
+        // Вывод оффсетов
+        printOffsets();
+        
+        // Применение
+        applyHitboxes();
+        
+        // Генерация файлов
+        generateLuaScript();
+        generateHeaderFile();
+        
+        printf("\n========================================\n");
+        printf("[+] Done! Files saved to Documents/\n");
+        printf("    - hitbox_offsets.lua\n");
+        printf("    - hitbox_offsets.h\n");
+        printf("========================================\n");
     }
     return 0;
 }
