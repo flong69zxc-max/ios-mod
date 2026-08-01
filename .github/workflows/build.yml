@@ -23,7 +23,7 @@ jobs:
       - name: Build Anti-Kick Module
         run: |
           xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
-            -framework Foundation -framework UIKit \
+            -framework Foundation -framework UIKit -framework AVFoundation \
             -stdlib=libc++ -std=c++17 -O3 \
             -o antikick.dylib antikick.mm
 
