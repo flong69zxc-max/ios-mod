@@ -8,6 +8,7 @@
 #import <unistd.h>
 #import <sys/mman.h>
 #import <dlfcn.h>
+#import <stdarg.h>
 
 #pragma mark - Конфигурация
 #define PATCH_DELAY 3.0
@@ -112,12 +113,18 @@ static void show_alert(const char *title, const char *msg, BOOL is_error) {
                 #pragma clang diagnostic pop
             }
             
+            // Последний fallback - берем любой window с root VC
             if (!root) {
-                // Последний fallback - берем любой window с root VC
-                for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                    if (w.rootViewController) {
-                        root = w.rootViewController;
-                        break;
+                if (@available(iOS 13.0, *)) {
+                    for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                        if ([scene isKindOfClass:[UIWindowScene class]]) {
+                            for (UIWindow *w in scene.windows) {
+                                if (w.rootViewController) {
+                                    root = w.rootViewController;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -138,20 +145,34 @@ static BOOL safe_memory_write(void *addr, const void *data, size_t size) {
     size_t page_size = MEMORY_PROTECT_PAGES;
     
     // Сохраняем текущие права
-    int prot = 0;
+    int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+    
+    // Изменяем права для записи
     if (mprotect((void *)page_start, page_size, PROT_READ | PROT_WRITE) != 0) {
-        log_to_file("❌ Не удалось изменить права памяти");
+        log_to_file("❌ Не удалось изменить права памяти (errno: %d)", errno);
         return NO;
     }
     
     // Запись данных
     memcpy(addr, data, size);
     
-    // Сброс кэша инструкций (ARM)
-    __builtin___clear_cache((char *)addr, (char *)addr + size);
+    // Синхронизация кэша для ARM (альтернатива __clear_cache)
+    #if defined(__arm64__) || defined(__aarch64__)
+        // Для ARM64 используем sys_icache_invalidate
+        asm volatile("dsb ishst");
+        asm volatile("ic ivau, %0" : : "r"(addr));
+        asm volatile("dsb ish");
+        asm volatile("isb");
+    #else
+        // Fallback для других архитектур
+        __builtin___clear_cache((char *)addr, (char *)addr + size);
+    #endif
     
-    // Восстановление прав
-    mprotect((void *)page_start, page_size, prot);
+    // Восстанавливаем права
+    if (mprotect((void *)page_start, page_size, prot) != 0) {
+        log_to_file("⚠️ Не удалось восстановить права памяти (errno: %d)", errno);
+        // Не критично, продолжаем
+    }
     
     return YES;
 }
@@ -217,7 +238,7 @@ static void* find_hitbox(long *offset, int *sig_index) {
                     if (valid) {
                         *offset = pos;
                         *sig_index = sig;
-                        log_to_file("✅ Найдена сигнатура #%d", sig);
+                        log_to_file("✅ Найдена сигнатура #%d по адресу %p", sig, start + pos);
                         return start + pos;
                     }
                 }
