@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Ultra detailed logging with exact pattern search
+// Fixed compilation errors
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -35,10 +35,26 @@ static HitboxValue gHitboxes[] = {
 };
 #define HITBOX_COUNT (sizeof(gHitboxes)/sizeof(gHitboxes[0]))
 #define STEP_SIZE 0x20
-#define PADDING_SIZE 0x1C
 
 // ============================================================
-// 2. Logging helper
+// 2. Memory helpers (declared before use)
+// ============================================================
+static mach_port_t gTask = MACH_PORT_NULL;
+
+static BOOL read_memory(vm_address_t addr, void *buffer, size_t size) {
+    vm_size_t outSize = 0;
+    kern_return_t kr = vm_read_overwrite(gTask, addr, size,
+                                         (vm_address_t)buffer, &outSize);
+    return (kr == KERN_SUCCESS && outSize == size);
+}
+
+static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
+    kern_return_t kr = vm_write(gTask, addr, (vm_offset_t)buffer, size);
+    return (kr == KERN_SUCCESS);
+}
+
+// ============================================================
+// 3. Logging helper
 // ============================================================
 static void write_log(NSString *format, ...) {
     @autoreleasepool {
@@ -78,7 +94,7 @@ static void write_log(NSString *format, ...) {
 }
 
 // ============================================================
-// 3. Hex dump helper
+// 4. Hex dump helper
 // ============================================================
 static NSString *hexDump(vm_address_t addr, size_t length) {
     NSMutableString *hex = [NSMutableString string];
@@ -97,34 +113,9 @@ static NSString *hexDump(vm_address_t addr, size_t length) {
 }
 
 // ============================================================
-// 4. Forward declaration
+// 5. Forward declaration
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle);
-
-// ============================================================
-// 5. Memory helpers
-// ============================================================
-static mach_port_t gTask = MACH_PORT_NULL;
-
-static BOOL read_memory(vm_address_t addr, void *buffer, size_t size) {
-    vm_size_t outSize = 0;
-    kern_return_t kr = vm_read_overwrite(gTask, addr, size,
-                                         (vm_address_t)buffer, &outSize);
-    if (kr != KERN_SUCCESS) {
-        write_log(@"    ⚠️ READ FAILED at 0x%llX: %s", (unsigned long long)addr, mach_error_string(kr));
-        return NO;
-    }
-    return YES;
-}
-
-static BOOL write_memory(vm_address_t addr, const void *buffer, size_t size) {
-    kern_return_t kr = vm_write(gTask, addr, (vm_offset_t)buffer, size);
-    if (kr != KERN_SUCCESS) {
-        write_log(@"    ⚠️ WRITE FAILED at 0x%llX: %s", (unsigned long long)addr, mach_error_string(kr));
-        return NO;
-    }
-    return YES;
-}
 
 // ============================================================
 // 6. Find blackrussia-client framework
@@ -236,15 +227,6 @@ static vm_address_t find_exact_pattern(vm_address_t start, vm_size_t size) {
     write_log(@"  Step:     0x%X between each value", STEP_SIZE);
     write_log(@"");
     
-    uint8_t pattern[32] = {
-        0x9A, 0x99, 0x19, 0x3E, // HEAD
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 28 bytes zeros
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
-        0xCD, 0xCC, 0x4C, 0x3E  // TORSO_1
-    };
-    
     int checked = 0;
     int foundCandidates = 0;
     int readErrors = 0;
@@ -257,72 +239,84 @@ static vm_address_t find_exact_pattern(vm_address_t start, vm_size_t size) {
                      checked, (float)checked / (size / 4) * 100);
         }
         
-        uint8_t buf[32] = {0};
-        if (!read_memory(addr, buf, 32)) {
+        // Read HEAD
+        uint32_t headVal = 0;
+        if (!read_memory(addr, &headVal, 4)) {
             readErrors++;
             continue;
         }
         
-        // Check exact pattern
-        if (memcmp(buf, pattern, 32) == 0) {
-            foundCandidates++;
-            write_log(@"");
-            write_log(@"🎯 Found candidate #%d at 0x%llX", foundCandidates, (unsigned long long)addr);
-            write_log(@"  Pattern matched exactly!");
-            write_log(@"  HEAD:     9A 99 19 3E at 0x%llX", (unsigned long long)addr);
-            write_log(@"  TORSO_1:  CD CC 4C 3E at 0x%llX", (unsigned long long)(addr + 0x20));
-            write_log(@"");
+        // Check HEAD
+        if (headVal != gHitboxes[0].original) continue;
+        
+        // Read TORSO_1 at +0x20
+        uint32_t torsoVal = 0;
+        vm_address_t torsoAddr = addr + STEP_SIZE;
+        if (!read_memory(torsoAddr, &torsoVal, 4)) {
+            readErrors++;
+            continue;
+        }
+        
+        // Check TORSO_1
+        if (torsoVal != gHitboxes[1].original) continue;
+        
+        // Found candidate
+        foundCandidates++;
+        write_log(@"");
+        write_log(@"🎯 Found candidate #%d at 0x%llX", foundCandidates, (unsigned long long)addr);
+        write_log(@"  HEAD:     9A 99 19 3E at 0x%llX", (unsigned long long)addr);
+        write_log(@"  TORSO_1:  CD CC 4C 3E at 0x%llX", (unsigned long long)torsoAddr);
+        write_log(@"");
+        
+        // Verify all 10 values
+        write_log(@"  Verifying all 10 hitboxes:");
+        BOOL allMatch = YES;
+        
+        for (int i = 0; i < HITBOX_COUNT; i++) {
+            vm_address_t checkAddr = addr + i * STEP_SIZE;
+            uint32_t checkBuf = 0;
             
-            // Verify all 10 values
-            write_log(@"  Verifying all 10 hitboxes:");
-            BOOL allMatch = YES;
-            
-            for (int i = 0; i < HITBOX_COUNT; i++) {
-                vm_address_t checkAddr = addr + i * STEP_SIZE;
-                uint32_t checkBuf = 0;
-                
-                if (!read_memory(checkAddr, &checkBuf, 4)) {
-                    write_log(@"    ❌ %s: CAN'T READ at 0x%llX", gHitboxes[i].name, (unsigned long long)checkAddr);
-                    allMatch = NO;
-                    break;
-                }
-                
-                float checkFloat = *(float*)&checkBuf;
-                
-                if (checkBuf == gHitboxes[i].original) {
-                    write_log(@"    ✅ %s: 0x%08X (%.4f) at 0x%llX ✓", 
-                             gHitboxes[i].name, checkBuf, checkFloat, (unsigned long long)checkAddr);
-                } else {
-                    write_log(@"    ❌ %s: expected 0x%08X (%.4f), got 0x%08X (%.4f) at 0x%llX", 
-                             gHitboxes[i].name, 
-                             gHitboxes[i].original, gHitboxes[i].originalFloat,
-                             checkBuf, checkFloat,
-                             (unsigned long long)checkAddr);
-                    allMatch = NO;
-                }
+            if (!read_memory(checkAddr, &checkBuf, 4)) {
+                write_log(@"    ❌ %s: CAN'T READ at 0x%llX", gHitboxes[i].name, (unsigned long long)checkAddr);
+                allMatch = NO;
+                break;
             }
             
-            if (allMatch) {
-                write_log(@"");
-                write_log(@"╔═══════════════════════════════════════════════════════════╗");
-                write_log(@"║     ✅ ALL 10 HITBOXES VERIFIED SUCCESSFULLY!            ║");
-                write_log(@"╚═══════════════════════════════════════════════════════════╝");
-                write_log(@"");
-                write_log(@"📍 Found at: 0x%llX", (unsigned long long)addr);
-                write_log(@"📊 Total candidates found: %d", foundCandidates);
-                write_log(@"📊 Total positions scanned: %d", checked);
-                write_log(@"");
-                
-                // Dump the found area
-                write_log(@"📄 Memory dump around found address:");
-                for (int i = -2; i <= 12; i++) {
-                    vm_address_t dumpAddr = addr + i * STEP_SIZE;
-                    write_log(@"  0x%llX: %@", (unsigned long long)dumpAddr, hexDump(dumpAddr, 16));
-                }
-                write_log(@"");
-                
-                return addr;
+            float checkFloat = *(float*)&checkBuf;
+            
+            if (checkBuf == gHitboxes[i].original) {
+                write_log(@"    ✅ %s: 0x%08X (%.4f) at 0x%llX ✓", 
+                         gHitboxes[i].name, checkBuf, checkFloat, (unsigned long long)checkAddr);
+            } else {
+                write_log(@"    ❌ %s: expected 0x%08X (%.4f), got 0x%08X (%.4f) at 0x%llX", 
+                         gHitboxes[i].name, 
+                         gHitboxes[i].original, gHitboxes[i].originalFloat,
+                         checkBuf, checkFloat,
+                         (unsigned long long)checkAddr);
+                allMatch = NO;
             }
+        }
+        
+        if (allMatch) {
+            write_log(@"");
+            write_log(@"╔═══════════════════════════════════════════════════════════╗");
+            write_log(@"║     ✅ ALL 10 HITBOXES VERIFIED SUCCESSFULLY!            ║");
+            write_log(@"╚═══════════════════════════════════════════════════════════╝");
+            write_log(@"");
+            write_log(@"📍 Found at: 0x%llX", (unsigned long long)addr);
+            write_log(@"📊 Total candidates found: %d", foundCandidates);
+            write_log(@"📊 Total positions scanned: %d", checked);
+            write_log(@"");
+            
+            // Dump the found area
+            write_log(@"📄 Memory dump around found address:");
+            for (int i = -2; i <= 12; i++) {
+                vm_address_t dumpAddr = addr + i * STEP_SIZE;
+                write_log(@"  0x%llX: %@", (unsigned long long)dumpAddr, hexDump(dumpAddr, 16));
+            }
+            write_log(@"");
+            
+            return addr;
         }
     }
     
