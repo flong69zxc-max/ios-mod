@@ -4,6 +4,9 @@
 #import <string.h>
 #import <unistd.h>
 #import <stdlib.h>
+#import <sys/mman.h>
+#import <sys/stat.h>
+#import <fcntl.h>
 
 #define RESET   "\033[0m"
 #define RED     "\033[31m"
@@ -99,32 +102,29 @@ static int patch(const char *path) {
         return 1;
     }
     
-    FILE *f = fopen(path, "rb+");
-    if (!f) {
+    int fd = open(path, O_RDWR | O_SYNC);
+    if (fd < 0) {
         logMsg("ERROR", "Не удалось открыть файл");
         notify("❌ ОШИБКА", "Нет прав на чтение");
         return 1;
     }
     
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    struct stat st;
+    fstat(fd, &st);
+    long size = st.st_size;
     
     if (size < 0x130) {
         logMsg("ERROR", "Файл слишком маленький");
-        fclose(f);
+        close(fd);
         return 1;
     }
     
-    unsigned char *buf = malloc(size);
-    if (!buf) {
-        logMsg("ERROR", "Не хватает памяти");
-        fclose(f);
+    unsigned char *buf = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (buf == MAP_FAILED) {
+        logMsg("ERROR", "mmap не удался");
+        close(fd);
         return 1;
     }
-    
-    fread(buf, 1, size, f);
-    fclose(f);
     
     unsigned char sig[4] = {0x9A, 0x99, 0x19, 0x3E};
     long pos = -1;
@@ -145,15 +145,16 @@ static int patch(const char *path) {
     if (pos < 0) {
         logMsg("ERROR", "Структура не найдена");
         notify("❌ ОШИБКА", "Хитбоксы не найдены");
-        free(buf);
+        munmap(buf, size);
+        close(fd);
         return 1;
     }
     
     hb = (HitboxValues*)(buf + pos);
-    float old[10] = {hb->head, hb->torso_1, hb->torso_2, hb->legs_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
+    float old[10] = {hb->head, hb->torso_1,йд hb->torsoено_2, h поb->legs ад_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
     
     char tmp[512];
-    snprintf(tmp, sizeof(tmp), "✅ Найдено по адресу: 0x%lX", pos);
+    snprintf(tmp, sizeof(tmp), "✅ Наресу: 0x%lX", pos);
     logMsg("SUCCESS", tmp);
     
     for (int i = 0; i < 10; i++) {
@@ -167,9 +168,14 @@ static int patch(const char *path) {
     
     char backup[512];
     snprintf(backup, sizeof(backup), "%s.backup", path);
-    FILE *b = fopen(backup, "wb");
-    if (b) { fwrite(buf, 1, size, b); fclose(b); logMsg("OK", "💾 Бэкап создан"); }
-    else logMsg("WARN", "⚠️ Бэкап не создан");
+    int backup_fd = open(backup, O_WRONLY | O_CREAT, 0644);
+    if (backup_fd >= 0) {
+        write(backup_fd, buf, size);
+        close(backup_fd);
+        logMsg("OK", "💾 Бэкап создан");
+    } else {
+        logMsg("WARN", "⚠️ Бэкап не создан");
+    }
     
     hb->head = news[0];
     hb->torso_1 = news[1];
@@ -182,24 +188,19 @@ static int patch(const char *path) {
     hb->stomach = news[8];
     hb->pelvis = news[9];
     
-    f = fopen(path, "wb");
-    if (!f) {
-        logMsg("ERROR", "Не удалось открыть для записи");
-        notify("❌ ОШИБКА", "Нет прав на запись");
-        free(buf);
-        return 1;
+    if (msync(buf, size, MS_SYNC) != 0) {
+        logMsg("WARN", "msync не удался");
     }
     
-    fwrite(buf, 1, size, f);
-    fclose(f);
-    free(buf);
+    munmap(buf, size);
+    close(fd);
     
     for (int i = 0; i < 10; i++) {
         snprintf(tmp, sizeof(tmp), "  %s: %.3f → %.3f", names[i], old[i], news[i]);
         logMsg("OK", tmp);
     }
     
-    snprintf(gameMsg, sizeof(gameMsg), "✅ ПАТЧ ПРИМЕНЁН!\n\n📍 Адрес: 0x%lX\n\nНовые значения:\nHEAD: %.3f (было %.3f)\nTORSO_1: %.3f (было %.3f)\nTORSO_2: %.3f (было %.3f)\nLEGS_1: %.3f (было %.3f)\nLEGS_2: %.3f (было %.3f)\nARMS_1: %.3f (было %.3f)\nARMS_2: %.3f (было %.3f)\nCHEST: %.3f (было %.3f)\nSTOMACH: %.3f (было %.3f)\nPELVIS: %.3f (было %.3f)\n\n📁 Лог: Загрузки/hitbox_patch.log", pos, news[0], old[0], news[1], old[1], news[2], old[2], news[3], old[3], news[4], old[4], news[5], old[5], news[6], old[6], news[7], old[7], news[8], old[8], news[9], old[9]);
+    snprintf(gameMsg, sizeof(gameMsg), "✅ ПАТЧ ПРИМЕНЁН!\n\n📍 Адрес: 0x%lX\n\nНовые значения:\nHEAD: %.3f (было %.3f)\nTORSO_1: %.3f (было %.3f)\nTORSO_2: %.3f (было %.3f)\nLEGS_1: %.3f (было %.3f)\nLEGS_2: %.3f (было %.3f)\nARMS_1: %.3f (было %.3f)\nARMS_2: %.3f (было %.3f)\nCHEST: %.3f (было %.3f)\nSTOMACH: %.3f (было %.3f)\nPELVIS: %.3f (было %.3f)\n\n📁 Лог: Загрузки/hitbox_patch.log\n\n⚠️ ПЕРЕЗАПУСТИ ИГРУ!", pos, news[0], old[0], news[1], old[1], news[2], old[2], news[3], old[3], news[4], old[4], news[5], old[5], news[6], old[6], news[7], old[7], news[8], old[8], news[9], old[9]);
     
     logMsg("SUCCESS", "🎉 Патч применён");
     notify("🎉 УСПЕХ!", gameMsg);
@@ -213,7 +214,6 @@ static void findAndPatch(void) {
         
         NSFileManager *fm = [NSFileManager defaultManager];
         
-        // Ищем файл рекурсивно
         NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:bundlePath];
         NSString *file;
         while ((file = [enumerator nextObject])) {
@@ -225,7 +225,6 @@ static void findAndPatch(void) {
             }
         }
         
-        // Если не нашли - пробуем альтернативные пути
         const char *paths[] = {
             "BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
             "Payload/BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client",
@@ -248,7 +247,7 @@ static void findAndPatch(void) {
 __attribute__((constructor)) static void init(void) {
     @autoreleasepool {
         printf("\n═══════════════════════════════════════════════\n");
-        printf("   HITBOX PATCHER v3.0\n");
+        printf("   HITBOX PATCHER v4.0\n");
         printf("═══════════════════════════════════════════════\n\n");
         
         findAndPatch();
