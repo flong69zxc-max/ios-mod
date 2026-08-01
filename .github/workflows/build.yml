@@ -13,19 +13,36 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build Hitbox Patcher
+      - name: Compile all modules
         run: |
+          echo "🔨 Building modules..."
+          
+          # 1. Hitbox Patcher
+          echo "📦 Building hitbox.dylib..."
           xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
             -framework Foundation -framework UIKit \
             -stdlib=libc++ -std=c++17 -O3 \
             -o hitbox.dylib main.mm
-
-      - name: Build Anti-Kick Module
-        run: |
-          xcrun -sdk iphoneos clang++ -arch arm64 -dynamiclib \
+          
+          # 2. Anti-Kick
+          echo "📦 Building antikick.dylib..."
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -framework Foundation -framework UIKit -framework AVFoundation \
-            -stdlib=libc++ -std=c++17 -O3 \
-            -o antikick.dylib antikick.mm
+            -O3 -o antikick.dylib antikick.mm
+          
+          # 3. No Reload Patch
+          echo "📦 Building norelpatch.dylib..."
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
+            -framework Foundation -framework UIKit \
+            -O3 -o norelpatch.dylib norelpatch.mm
+          
+          echo ""
+          echo "✅ All modules built:"
+          ls -la *.dylib
+          
+          echo ""
+          echo "📋 File info:"
+          file *.dylib
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -34,3 +51,4 @@ jobs:
           path: |
             hitbox.dylib
             antikick.dylib
+            norelpatch.dylib
