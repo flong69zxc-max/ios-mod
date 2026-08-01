@@ -5,14 +5,7 @@
 #import <unistd.h>
 #import <stdlib.h>
 #import <mach-o/dyld.h>
-#import <dlfcn.h>
-
-#define RESET   "\033[0m"
-#define RED     "\033[31m"
-#define GREEN   "\033[32m"
-#define YELLOW  "\033[33m"
-#define CYAN    "\033[36m"
-#define MAGENTA "\033[35m"
+#import <mach-o/loader.h>
 
 typedef struct {
     float head;
@@ -38,14 +31,31 @@ typedef struct {
 
 static const float orig[10] = {0.15f, 0.20f, 0.25f, 0.25f, 0.16f, 0.16f, 0.20f, 0.20f, 0.15f, 0.15f};
 static const float news[10] = {0.225f, 0.30f, 0.375f, 0.375f, 0.24f, 0.24f, 0.30f, 0.30f, 0.225f, 0.225f};
-static const char *names[10] = {"HEAD", "TORSO_1", "TORSO_2", "LEGS_1", "LEGS_2", "ARMS_1", "ARMS_2", "CHEST", "STOMACH", "PELVIS"};
+static const char *names[10] = {"HEAD","TORSO_1","TORSO_2","LEGS_1","LEGS_2","ARMS_1","ARMS_2","CHEST","STOMACH","PELVIS"};
 
-@interface AlertView : NSObject @end
-@implementation AlertView
-+ (void)show:(NSString *)title msg:(NSString *)msg {
+static void log_msg(const char *msg) {
+    time_t t = time(NULL);
+    struct tm *tm = localtime(&t);
+    char ts[20];
+    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+    
+    NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *saves = [doc stringByAppendingPathComponent:@"saves"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:saves]) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:saves withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    NSString *logPath = [saves stringByAppendingPathComponent:@"hitbox_patch.log"];
+    FILE *f = fopen([logPath UTF8String], "a");
+    if (f) { fprintf(f, "[%s] %s\n", ts, msg); fclose(f); }
+}
+
+static void show_notification(const char *title, const char *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:[NSString stringWithUTF8String:title]
+                                                                       message:[NSString stringWithUTF8String:message]
+                                                                preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        
         UIViewController *root = nil;
         if (@available(iOS 13.0, *)) {
             for (UIWindowScene *scene in [UIApplication sharedApplication].connectedScenes) {
@@ -61,40 +71,19 @@ static const char *names[10] = {"HEAD", "TORSO_1", "TORSO_2", "LEGS_1", "LEGS_2"
         }
         if (!root) {
             for (UIWindow *w in [UIApplication sharedApplication].windows) {
-                if (w.rootViewController) { root = w.rootViewController; break; }
+                if (w.rootViewController) {
+                    root = w.rootViewController;
+                    break;
+                }
             }
         }
-        if (root) [root presentViewController:alert animated:YES completion:nil];
+        if (root) {
+            [root presentViewController:alert animated:YES completion:nil];
+        }
     });
 }
-@end
 
-static NSString* savesPath(void) {
-    NSString *doc = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    NSString *saves = [doc stringByAppendingPathComponent:@"saves"];
-    if (![[NSFileManager defaultManager] fileExistsAtPath:saves]) {
-        [[NSFileManager defaultManager] createDirectoryAtPath:saves withIntermediateDirectories:YES attributes:nil error:nil];
-    }
-    return [[NSFileManager defaultManager] fileExistsAtPath:saves] ? saves : doc;
-}
-
-static void logMsg(const char *msg) {
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    char ts[20];
-    strftime(ts, sizeof(ts), "%H:%M:%S", tm);
-    printf("[%s] %s\n", ts, msg);
-    NSString *logPath = [savesPath() stringByAppendingPathComponent:@"hitbox_patch.log"];
-    FILE *f = fopen([logPath UTF8String], "a");
-    if (f) { fprintf(f, "[%s] %s\n", ts, msg); fclose(f); }
-}
-
-static void notify(const char *title, const char *msg) {
-    [AlertView show:[NSString stringWithUTF8String:title] msg:[NSString stringWithUTF8String:msg]];
-}
-
-static void* findInMemory(const char *filename, const unsigned char *sig, size_t sig_len, long *offset) {
-    // Ищем образ в памяти
+static void* find_in_memory(const char *filename, const unsigned char *sig, size_t sig_len, long *offset) {
     uint32_t count = _dyld_image_count();
     for (uint32_t i = 0; i < count; i++) {
         const char *name = _dyld_get_image_name(i);
@@ -103,7 +92,6 @@ static void* findInMemory(const char *filename, const unsigned char *sig, size_t
             struct mach_header_64 *header = (struct mach_header_64*)_dyld_get_image_header(i);
             if (!header) continue;
             
-            // Получаем размер сегмента
             uintptr_t size = 0;
             struct load_command *cmd = (struct load_command*)((uintptr_t)header + sizeof(struct mach_header_64));
             for (uint32_t j = 0; j < header->ncmds; j++) {
@@ -116,11 +104,9 @@ static void* findInMemory(const char *filename, const unsigned char *sig, size_t
                 cmd = (struct load_command*)((uintptr_t)cmd + cmd->cmdsize);
             }
             
-            // Ищем сигнатуру в памяти
             unsigned char *start = (unsigned char*)base;
             for (uintptr_t i = 0; i < size - sig_len; i += 4) {
                 if (memcmp(start + i, sig, sig_len) == 0) {
-                    // Проверяем структуру
                     HitboxValues *hb = (HitboxValues*)(start + i);
                     float vals[10] = {hb->head, hb->torso_1, hb->torso_2, hb->legs_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
                     int match = 1;
@@ -138,42 +124,39 @@ static void* findInMemory(const char *filename, const unsigned char *sig, size_t
     return NULL;
 }
 
-static int patchInMemory(void) {
-    logMsg("🚀 Поиск хитбоксов в памяти");
+__attribute__((constructor)) static void init(void) {
+    // Даём игре загрузиться
+    sleep(2);
+    
+    show_notification("🔄 Применяем патч", "Поиск хитбоксов в памяти...");
+    log_msg("🚀 Запуск патча в памяти");
     
     unsigned char sig[4] = {0x9A, 0x99, 0x19, 0x3E};
     long offset = 0;
-    
-    // Ищем в загруженных библиотеках
-    void *addr = findInMemory("blackrussia-client", sig, 4, &offset);
+    void *addr = find_in_memory("blackrussia-client", sig, 4, &offset);
     if (!addr) {
-        // Пробуем в основном бинарнике
-        addr = findInMemory("BrBase", sig, 4, &offset);
+        addr = find_in_memory("BrBase", sig, 4, &offset);
     }
     
     if (!addr) {
-        logMsg("❌ Структура не найдена в памяти");
-        notify("❌ ОШИБКА", "Хитбоксы не найдены");
-        return 1;
+        log_msg("❌ Хитбоксы не найдены в памяти");
+        show_notification("❌ Ошибка", "Хитбоксы не найдены в памяти");
+        return;
     }
     
     HitboxValues *hb = (HitboxValues*)addr;
     float old[10] = {hb->head, hb->torso_1, hb->torso_2, hb->legs_1, hb->legs_2, hb->arms_1, hb->arms_2, hb->chest, hb->stomach, hb->pelvis};
     
-    char tmp[512];
-    snprintf(tmp, sizeof(tmp), "✅ Найдено в памяти по адресу: %p (offset: 0x%lX)", addr, offset);
-    logMsg(tmp);
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "✅ Найдено по адресу: %p (offset: 0x%lX)", addr, offset);
+    log_msg(tmp);
     
     for (int i = 0; i < 10; i++) {
         snprintf(tmp, sizeof(tmp), "  %s: %.3f", names[i], old[i]);
-        logMsg(tmp);
+        log_msg(tmp);
     }
     
-    char gameMsg[1024];
-    snprintf(gameMsg, sizeof(gameMsg), "📍 Адрес: %p\n\nНайдены значения:\nHEAD: %.3f\nTORSO: %.3f / %.3f\nLEGS: %.3f / %.3f\nARMS: %.3f / %.3f\nCHEST: %.3f\nSTOMACH: %.3f\nPELVIS: %.3f\n\n🔄 Применяем патч в памяти...", addr, old[0], old[1], old[2], old[3], old[4], old[5], old[6], old[7], old[8], old[9]);
-    notify("🎯 ХИТБОКСЫ НАЙДЕНЫ", gameMsg);
-    
-    // Патчим в памяти (не на диске!)
+    // Патчим в памяти
     hb->head = news[0];
     hb->torso_1 = news[1];
     hb->torso_2 = news[2];
@@ -185,34 +168,40 @@ static int patchInMemory(void) {
     hb->stomach = news[8];
     hb->pelvis = news[9];
     
-    logMsg("📊 Изменения:");
+    log_msg("📊 Изменения:");
     for (int i = 0; i < 10; i++) {
         snprintf(tmp, sizeof(tmp), "  %s: %.3f → %.3f", names[i], old[i], news[i]);
-        logMsg(tmp);
+        log_msg(tmp);
     }
     
-    snprintf(gameMsg, sizeof(gameMsg), "✅ ПАТЧ ПРИМЕНЁН В ПАМЯТИ!\n\n📍 Адрес: %p\n\nНовые значения:\nHEAD: %.3f (было %.3f)\nTORSO_1: %.3f (было %.3f)\nTORSO_2: %.3f (было %.3f)\nLEGS_1: %.3f (было %.3f)\nLEGS_2: %.3f (было %.3f)\nARMS_1: %.3f (было %.3f)\nARMS_2: %.3f (было %.3f)\nCHEST: %.3f (было %.3f)\nSTOMACH: %.3f (было %.3f)\nPELVIS: %.3f (было %.3f)\n\n📁 Лог: saves/hitbox_patch.log\n\n✅ ИГРАЙ! ВСЁ РАБОТАЕТ!", addr, news[0], old[0], news[1], old[1], news[2], old[2], news[3], old[3], news[4], old[4], news[5], old[5], news[6], old[6], news[7], old[7], news[8], old[8], news[9], old[9]);
+    log_msg("🎉 Патч в памяти применён успешно!");
     
-    logMsg("🎉 Патч в памяти применён!");
-    notify("🎉 УСПЕХ!", gameMsg);
-    return 0;
+    // Формируем сообщение для уведомления
+    char msg[1024];
+    snprintf(msg, sizeof(msg),
+             "✅ Хитбоксы успешно установлены!\n\n"
+             "HEAD: %.3f (было %.3f)\n"
+             "TORSO_1: %.3f (было %.3f)\n"
+             "TORSO_2: %.3f (было %.3f)\n"
+             "LEGS_1: %.3f (было %.3f)\n"
+             "LEGS_2: %.3f (было %.3f)\n"
+             "ARMS_1: %.3f (было %.3f)\n"
+             "ARMS_2: %.3f (было %.3f)\n"
+             "CHEST: %.3f (было %.3f)\n"
+             "STOMACH: %.3f (было %.3f)\n"
+             "PELVIS: %.3f (было %.3f)",
+             news[0], old[0],
+             news[1], old[1],
+             news[2], old[2],
+             news[3], old[3],
+             news[4], old[4],
+             news[5], old[5],
+             news[6], old[6],
+             news[7], old[7],
+             news[8], old[8],
+             news[9], old[9]);
+    
+    show_notification("🎉 Успех!", msg);
 }
 
-__attribute__((constructor)) static void init(void) {
-    @autoreleasepool {
-        printf("\n═══════════════════════════════════════════════\n");
-        printf("   HITBOX PATCHER v5.0 — In-Memory\n");
-        printf("═══════════════════════════════════════════════\n\n");
-        
-        // Даём игре время загрузиться
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            patchInMemory();
-        });
-        
-        printf("\n═══════════════════════════════════════════════\n");
-        printf("📁 Лог: saves/hitbox_patch.log\n");
-        printf("═══════════════════════════════════════════════\n\n");
-    }
-}
-
-int main(void) { init(); while(1) sleep(1); return 0; }
+int main(void) { return 0; }
