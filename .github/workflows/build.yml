@@ -1,33 +1,32 @@
-name: Build Pure Dylib
+name: Build Raw .dylib for iOS
 
 on:
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches: [ main ]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    container:
-      image: angelxwind/theos:latest
-
+    runs-on: macos-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
-      - name: Build project
-        run: make
+    - name: Build dylib via Makefile
+      run: |
+        xcodebuild -create-xcframework \
+          -library build/libMyLib.dylib \
+          -headers include \
+          -output MyLib.xcframework
 
-      - name: Collect dylib and plist
-        run: |
-          mkdir -p compiled
-          find .theos/obj -name "*.dylib" -exec cp {} compiled/ \;
-          find .theos/obj -name "*.plist" -exec cp {} compiled/ \;
-          ls -la compiled/
+    - name: Extract raw dylib
+      run: |
+        cp build/Release-iphoneos/libMyLib.dylib ./MyLib.dylib
 
-      - name: Upload Dylib Artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: LowPowerMock-Dylib
-          path: compiled/*
+    - name: Sign dylib with ad-hoc
+      run: |
+        codesign -f -s - ./MyLib.dylib
+
+    - name: Upload .dylib
+      uses: actions/upload-artifact@v4
+      with:
+        name: Tweak.dylib
+        path: Tweak.dylib
