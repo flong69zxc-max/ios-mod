@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed with exact pattern from memory dump
+// Scans MAIN executable (BrBase.app) not framework
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -11,7 +11,7 @@
 #import <mach-o/getsect.h>
 
 // ============================================================
-// 1. Original hitbox values (from actual memory dump)
+// 1. Original hitbox values (from memory dump)
 // ============================================================
 typedef struct {
     const char *name;
@@ -22,16 +22,16 @@ typedef struct {
 } HitboxValue;
 
 static HitboxValue gHitboxes[] = {
-    {"HEAD",        0x3E19999A, 0x3E99999A, 0.15f, 0.30f},      // x2
-    {"TORSO_1",     0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},      // x2
-    {"TORSO_2",     0x3E800000, 0x3F000000, 0.25f, 0.50f},      // x2
-    {"MID",         0x3E800000, 0x3F000000, 0.25f, 0.50f},      // x2
-    {"LEFTARM",     0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},      // x2 (actual value from dump)
-    {"RIGHTARM",    0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},      // x2
-    {"LEFTLEG_1",   0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},      // x2
-    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},      // x2
-    {"LEFTLEG_2",   0x3E19999A, 0x3E99999A, 0.15f, 0.30f},      // x2
-    {"RIGHTLEG_2",  0x3E19999A, 0x3E99999A, 0.15f, 0.30f}       // x2
+    {"HEAD",        0x3E19999A, 0x3E99999A, 0.15f, 0.30f},
+    {"TORSO_1",     0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},
+    {"TORSO_2",     0x3E800000, 0x3F000000, 0.25f, 0.50f},
+    {"MID",         0x3E800000, 0x3F000000, 0.25f, 0.50f},
+    {"LEFTARM",     0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},
+    {"RIGHTARM",    0x3E23D70A, 0x3EA3D70A, 0.16f, 0.32f},
+    {"LEFTLEG_1",   0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},
+    {"RIGHTLEG_1",  0x3E4CCCCD, 0x3ECCCCCD, 0.20f, 0.40f},
+    {"LEFTLEG_2",   0x3E19999A, 0x3E99999A, 0.15f, 0.30f},
+    {"RIGHTLEG_2",  0x3E19999A, 0x3E99999A, 0.15f, 0.30f}
 };
 #define HITBOX_COUNT (sizeof(gHitboxes)/sizeof(gHitboxes[0]))
 #define STEP_SIZE 0x20
@@ -119,7 +119,7 @@ static NSString *hexDump(vm_address_t addr, size_t length) {
 static void show_notification(NSString *title, NSString *subtitle);
 
 // ============================================================
-// 6. Find blackrussia-client framework
+// 6. Find MAIN executable (BrBase.app)
 // ============================================================
 typedef struct {
     vm_address_t addr;
@@ -128,12 +128,12 @@ typedef struct {
     intptr_t slide;
 } MemoryRegion;
 
-static MemoryRegion find_blackrussia_client(void) {
+static MemoryRegion find_main_executable(void) {
     MemoryRegion result = {0, 0, NULL, 0};
     
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║              SEARCHING FOR blackrussia-client            ║");
+    write_log(@"║           SEARCHING FOR MAIN EXECUTABLE                  ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -141,17 +141,18 @@ static MemoryRegion find_blackrussia_client(void) {
     write_log(@"📊 Total loaded images: %d", imageCount);
     write_log(@"");
     
+    // First try to find BrBase.app
     for (uint32_t i = 0; i < imageCount; i++) {
         const char *name = _dyld_get_image_name(i);
-        const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        
         NSString *imageName = [NSString stringWithUTF8String:name];
         
-        if ([imageName containsString:@"blackrussia-client"] || 
-            [imageName containsString:@"blackrussia-client.framework"]) {
+        if ([imageName containsString:@"BrBase.app"] || 
+            [imageName containsString:@"BrBase"]) {
             
-            write_log(@"🎯 FOUND blackrussia-client!");
+            const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            
+            write_log(@"🎯 FOUND MAIN EXECUTABLE!");
             write_log(@"  ┌─────────────────────────────────────────────");
             write_log(@"  │ Image index: %d", i);
             write_log(@"  │ Path: %s", name);
@@ -160,6 +161,7 @@ static MemoryRegion find_blackrussia_client(void) {
             write_log(@"  └─────────────────────────────────────────────");
             write_log(@"");
             
+            // Get __DATA segment
             uint64_t dataSize = 0;
             char *dataPtr = getsectdatafromheader_64(header, "__DATA", "__data", &dataSize);
             
@@ -183,7 +185,39 @@ static MemoryRegion find_blackrussia_client(void) {
         }
     }
     
-    write_log(@"❌ blackrussia-client NOT FOUND!");
+    // If not found, try to find any image with "black" or "russia"
+    for (uint32_t i = 0; i < imageCount; i++) {
+        const char *name = _dyld_get_image_name(i);
+        NSString *imageName = [NSString stringWithUTF8String:name];
+        
+        if ([imageName containsString:@"black"] || 
+            [imageName containsString:@"Black"] ||
+            [imageName containsString:@"russia"] ||
+            [imageName containsString:@"Russia"]) {
+            
+            const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
+            intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+            
+            write_log(@"🔍 Found potential image: %s", name);
+            
+            uint64_t dataSize = 0;
+            char *dataPtr = getsectdatafromheader_64(header, "__DATA", "__data", &dataSize);
+            
+            if (dataPtr) {
+                vm_address_t dataAddr = (vm_address_t)dataPtr + slide;
+                result.addr = dataAddr;
+                result.size = (vm_size_t)dataSize;
+                result.path = name;
+                result.slide = slide;
+                
+                write_log(@"  __DATA.__data at 0x%llX size 0x%llX", 
+                         (unsigned long long)dataAddr, (unsigned long long)dataSize);
+                return result;
+            }
+        }
+    }
+    
+    write_log(@"❌ Main executable NOT FOUND!");
     return result;
 }
 
@@ -198,6 +232,13 @@ static vm_address_t find_with_tolerance(vm_address_t start, vm_size_t size) {
     write_log(@"");
     write_log(@"📍 Search range: 0x%llX - 0x%llX", (unsigned long long)start, (unsigned long long)(start + size));
     write_log(@"");
+    write_log(@"🔍 Looking for pattern from memory dump:");
+    write_log(@"  0x...888: 9A 99 19 3E (HEAD)");
+    write_log(@"  0x...8A8: CD CC 4C 3E (TORSO_1)");
+    write_log(@"  0x...8C8: 00 00 80 3E (TORSO_2)");
+    write_log(@"  0x...8E8: 00 00 80 3E (MID)");
+    write_log(@"  0x...908: 0A D7 23 3E (LEFTARM)");
+    write_log(@"");
     
     int checked = 0;
     int candidates = 0;
@@ -205,7 +246,8 @@ static vm_address_t find_with_tolerance(vm_address_t start, vm_size_t size) {
     for (vm_address_t addr = start; addr < start + size - 4; addr += 4) {
         checked++;
         if (checked % 100000 == 0) {
-            write_log(@"  Scanned %d positions", checked);
+            write_log(@"  Scanned %d positions (%.1f%%)", 
+                     checked, (float)checked / (size / 4) * 100);
         }
         
         // Check HEAD (exact match required)
@@ -248,7 +290,6 @@ static vm_address_t find_with_tolerance(vm_address_t start, vm_size_t size) {
                 write_log(@"  %s:     0x%08X (%.3f) ✗ (expected: %.3f, diff: %.6f)", 
                          gHitboxes[i].name, val, actual, expected, diff);
                 allMatch = NO;
-                // Don't break, log all mismatches
             }
         }
         
@@ -283,8 +324,8 @@ static vm_address_t find_with_tolerance(vm_address_t start, vm_size_t size) {
 static void patch_hitboxes(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v6.0                 ║");
-    write_log(@"║        x2 Hitboxes (from actual memory dump)             ║");
+    write_log(@"║        BLACK RUSSIA HITBOX PATCHER v7.0                 ║");
+    write_log(@"║        Scanning MAIN executable (BrBase.app)             ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     
@@ -302,16 +343,17 @@ static void patch_hitboxes(void) {
     }
     write_log(@"");
     
-    MemoryRegion brClient = find_blackrussia_client();
+    // Find main executable (not framework!)
+    MemoryRegion mainExe = find_main_executable();
     
-    if (brClient.addr == 0 || brClient.size == 0) {
+    if (mainExe.addr == 0 || mainExe.size == 0) {
         write_log(@"");
-        write_log(@"❌ CRITICAL: blackrussia-client NOT FOUND!");
-        show_notification(@"blackrussia-client not found.", @"Check HitBoxes.log");
+        write_log(@"❌ CRITICAL: Main executable NOT FOUND!");
+        show_notification(@"BrBase.app not found.", @"Check HitBoxes.log");
         return;
     }
     
-    vm_address_t found = find_with_tolerance(brClient.addr, brClient.size);
+    vm_address_t found = find_with_tolerance(mainExe.addr, mainExe.size);
     
     if (!found) {
         write_log(@"");
@@ -353,7 +395,7 @@ static void patch_hitboxes(void) {
         if (verifyValue == newValue) {
             write_log(@"  ✅ VERIFIED");
         } else {
-            write_log(@"  ❌ VERIFY FAILED!");
+            write_log(@"  ❌ VERIFY FAILED! Expected 0x%08X got 0x%08X", newValue, verifyValue);
             success = NO;
             break;
         }
@@ -439,8 +481,8 @@ __attribute__((constructor))
 static void initialize(void) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v6.0 INJECTED          ║");
-    write_log(@"║      x2 Hitboxes (from memory dump)                     ║");
+    write_log(@"║      BLACK RUSSIA HITBOX PATCHER v7.0 INJECTED          ║");
+    write_log(@"║      Scanning MAIN executable (BrBase.app)               ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
     write_log(@"");
     write_log(@"⏳ Waiting 5 seconds for Black Russia to fully load...");
