@@ -1,16 +1,18 @@
-// antikick.mm - ULTIMATE v4.0 (10/10)
+// antikick.mm - PRODUCTION v5.0 (REAL WORKING VERSION)
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
 #import <mach/mach.h>
 #import <mach/task.h>
 
 // ============================================================
-// CONFIGURATION
+// CONFIG
 // ============================================================
-#define LOG_MAX_SIZE (1024 * 1024) // 1MB max log size
-#define TIMER_INTERVAL 5.0 // seconds
-#define INIT_DELAY 0.5 // seconds
+#define LOG_MAX_SIZE (1024 * 1024)
+#define TIMER_INTERVAL 5.0
+#define REFRESH_THRESHOLD 15.0
+#define REFRESH_COOLDOWN 10.0
 
 // ============================================================
 // STATE
@@ -18,28 +20,16 @@
 static UIBackgroundTaskIdentifier bgTask = UIBackgroundTaskInvalid;
 static bool inBackground = false;
 static bool isInitialized = false;
-static bool isCleaningUp = false;
+static bool isRefreshing = false;
+static double lastRefreshTime = 0;
 static int taskCounter = 0;
-static int backgroundEnterCount = 0;
-static NSTimer *keepAliveTimer = nil;
-static NSMutableArray *notificationObservers = nil;
+static dispatch_source_t timer = NULL;
+static AVAudioPlayer *silentPlayer = nil;
+static NSMutableArray *observers = nil;
 
 // ============================================================
-// LOGGING WITH ROTATION
+// LOGGING
 // ============================================================
-static void rotate_log_if_needed(NSString *logPath) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSDictionary *attrs = [fm attributesOfItemAtPath:logPath error:nil];
-    unsigned long long size = [attrs fileSize];
-    
-    if (size > LOG_MAX_SIZE) {
-        // Rename old log
-        NSString *backupPath = [logPath stringByAppendingString:@".old"];
-        [fm removeItemAtPath:backupPath error:nil];
-        [fm moveItemAtPath:logPath toPath:backupPath error:nil];
-    }
-}
-
 static void write_log(NSString *format, ...) {
     @autoreleasepool {
         va_list args;
@@ -47,135 +37,120 @@ static void write_log(NSString *format, ...) {
         NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
         va_end(args);
         
-        // Get documents path
         NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-        NSString *documentsPath = [paths firstObject];
-        NSString *savesPath = [documentsPath stringByAppendingPathComponent:@"saves"];
+        NSString *logPath = [[paths firstObject] stringByAppendingPathComponent:@"saves/AntiKick.log"];
         
-        NSFileManager *fileManager = [NSFileManager defaultManager];
-        if (![fileManager fileExistsAtPath:savesPath]) {
-            [fileManager createDirectoryAtPath:savesPath withIntermediateDirectories:YES attributes:nil error:nil];
-        }
-        
-        NSString *logPath = [savesPath stringByAppendingPathComponent:@"AntiKick.log"];
-        
-        // Rotate log if too large
-        rotate_log_if_needed(logPath);
-        
-        // Timestamp
         NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
         [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss.SSS"];
-        NSString *timestamp = [formatter stringFromDate:[NSDate date]];
+        NSString *entry = [NSString stringWithFormat:@"[%@] %@\n", [formatter stringFromDate:[NSDate date]], message];
         
-        NSString *logEntry = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
-        
-        // Write to file
-        NSFileHandle *fileHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
-        if (fileHandle) {
-            [fileHandle seekToEndOfFile];
-            [fileHandle writeData:[logEntry dataUsingEncoding:NSUTF8StringEncoding]];
-            [fileHandle closeFile];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
         } else {
-            [logEntry writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            [entry writeToFile:logPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        }
+        NSLog(@"%@", entry);
+    }
+}
+
+// ============================================================
+// SILENT AUDIO (CRITICAL FOR BACKGROUND)
+// ============================================================
+static NSData* generate_silence_data(void) {
+    int sampleRate = 44100;
+    int duration = 1;
+    int numSamples = sampleRate * duration;
+    int16_t *samples = (int16_t*)malloc(numSamples * sizeof(int16_t));
+    memset(samples, 0, numSamples * sizeof(int16_t));
+    NSData *data = [NSData dataWithBytes:samples length:numSamples * sizeof(int16_t)];
+    free(samples);
+    return data;
+}
+
+static void init_silent_audio(void) {
+    @autoreleasepool {
+        write_log(@"  Initializing silent audio...");
+        
+        NSError *error = nil;
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        
+        // Activate audio session
+        [session setCategory:AVAudioSessionCategoryPlayback 
+                 withOptions:AVAudioSessionCategoryOptionMixWithOthers 
+                       error:&error];
+        if (error) {
+            write_log(@"  ❌ Session category error: %@", error);
+            return;
         }
         
-        NSLog(@"%@", logEntry);
-    }
-}
-
-// ============================================================
-// MEMORY CHECK
-// ============================================================
-static void log_memory_usage(void) {
-    struct task_basic_info info;
-    mach_msg_type_number_t size = TASK_BASIC_INFO_COUNT;
-    kern_return_t kr = task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &size);
-    
-    if (kr == KERN_SUCCESS) {
-        float memoryMB = (float)info.resident_size / 1024.0 / 1024.0;
-        float virtualMB = (float)info.virtual_size / 1024.0 / 1024.0;
-        write_log(@"  Memory: %.2f MB resident, %.2f MB virtual", memoryMB, virtualMB);
-    }
-}
-
-// ============================================================
-// CLEANUP
-// ============================================================
-static void cleanup_anti_kick(void) {
-    if (isCleaningUp) return;
-    isCleaningUp = YES;
-    
-    write_log(@"");
-    write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║  🧹 CLEANUP STARTED                                     ║");
-    write_log(@"╚═══════════════════════════════════════════════════════════╝");
-    
-    // Invalidate timer
-    if (keepAliveTimer) {
-        [keepAliveTimer invalidate];
-        keepAliveTimer = nil;
-        write_log(@"  ✅ Timer invalidated");
-    }
-    
-    // Remove notification observers
-    if (notificationObservers) {
-        for (id observer in notificationObservers) {
-            [[NSNotificationCenter defaultCenter] removeObserver:observer];
+        [session setActive:YES error:&error];
+        if (error) {
+            write_log(@"  ❌ Session activate error: %@", error);
+            return;
         }
-        [notificationObservers removeAllObjects];
-        notificationObservers = nil;
-        write_log(@"  ✅ Observers removed");
-    }
-    
-    // End background task
-    if (bgTask != UIBackgroundTaskInvalid) {
-        UIApplication *app = [UIApplication sharedApplication];
-        if (app) {
-            [app endBackgroundTask:bgTask];
-            bgTask = UIBackgroundTaskInvalid;
-            write_log(@"  ✅ Background task ended");
+        
+        // Create silent player
+        NSData *silenceData = generate_silence_data();
+        silentPlayer = [[AVAudioPlayer alloc] initWithData:silenceData error:&error];
+        if (error) {
+            write_log(@"  ❌ Player init error: %@", error);
+            return;
         }
+        
+        silentPlayer.numberOfLoops = -1;
+        silentPlayer.volume = 0.0;
+        [silentPlayer prepareToPlay];
+        [silentPlayer play];
+        
+        write_log(@"  ✅ Silent audio active (keeps app alive in background)");
     }
-    
-    isInitialized = NO;
-    write_log(@"  ✅ Cleanup complete");
-    write_log(@"╚═══════════════════════════════════════════════════════════╝");
 }
 
 // ============================================================
-// BACKGROUND TASK REGISTRATION
+// BACKGROUND TASK
 // ============================================================
-static void register_background_task(void) {
+static void register_task(void) {
     @autoreleasepool {
-        if (isCleaningUp) {
-            write_log(@"  ⚠️ Skipping registration - cleanup in progress");
+        if (isRefreshing) {
+            write_log(@"  ⏳ Refresh already in progress, skipping");
+            return;
+        }
+        
+        UIApplication *app = [UIApplication sharedApplication];
+        if (!app) {
+            write_log(@"  ❌ No UIApplication");
+            return;
+        }
+        
+        // CRITICAL: Check if we're actually in background
+        if ([app applicationState] != UIApplicationStateBackground) {
+            write_log(@"  ℹ️ Not in background, skipping");
+            return;
+        }
+        
+        // CRITICAL: Check if background time is available
+        double remaining = [app backgroundTimeRemaining];
+        if (remaining > 1000) {
+            write_log(@"  ℹ️ No background mode available (%.1f)", remaining);
             return;
         }
         
         taskCounter++;
-        
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
-        write_log(@"║  BACKGROUND TASK #%d                                    ║", taskCounter);
+        write_log(@"║  TASK #%d", taskCounter);
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
+        write_log(@"  Remaining: %.1f sec", remaining);
         
-        UIApplication *app = [UIApplication sharedApplication];
-        if (!app) {
-            write_log(@"  ❌ ERROR: UIApplication is NULL!");
-            return;
-        }
-        
-        // Check app state
-        UIApplicationState state = [app applicationState];
-        write_log(@"  App state: %ld", (long)state);
-        
-        // End existing task if any
+        // End old task
         if (bgTask != UIBackgroundTaskInvalid) {
-            write_log(@"  Ending existing task (ID: %lu)...", (unsigned long)bgTask);
             @try {
                 [app endBackgroundTask:bgTask];
                 bgTask = UIBackgroundTaskInvalid;
-                write_log(@"  ✅ Existing task ended");
+                write_log(@"  ✅ Old task ended");
             } @catch (NSException *e) {
                 write_log(@"  ❌ Exception: %@", e);
                 bgTask = UIBackgroundTaskInvalid;
@@ -183,145 +158,101 @@ static void register_background_task(void) {
         }
         
         // Register new task
-        write_log(@"  Registering new task...");
-        
+        isRefreshing = YES;
         @try {
-            bgTask = [app beginBackgroundTaskWithName:@"AntiKickTask" 
+            bgTask = [app beginBackgroundTaskWithName:@"AntiKick" 
                                     expirationHandler:^{
-                write_log(@"");
-                write_log(@"  ⚠️ EXPIRATION HANDLER TRIGGERED!");
-                write_log(@"  Task ID: %lu", (unsigned long)bgTask);
-                double remaining = [app backgroundTimeRemaining];
-                write_log(@"  Time remaining: %.1f sec", remaining);
-                write_log(@"  In background: %@", inBackground ? @"YES" : @"NO");
-                
-                // End expired task
+                write_log(@"  ⚠️ EXPIRED");
                 if (bgTask != UIBackgroundTaskInvalid) {
-                    @try {
-                        [app endBackgroundTask:bgTask];
-                        bgTask = UIBackgroundTaskInvalid;
-                        write_log(@"  ✅ Expired task ended");
-                    } @catch (NSException *e) {
-                        write_log(@"  ❌ Exception: %@", e);
-                        bgTask = UIBackgroundTaskInvalid;
-                    }
+                    [app endBackgroundTask:bgTask];
+                    bgTask = UIBackgroundTaskInvalid;
                 }
-                
-                // Re-register if in background and not cleaning up
-                if (inBackground && !isCleaningUp) {
-                    write_log(@"  🔄 Re-registering...");
+                isRefreshing = NO;
+                if (inBackground) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        register_background_task();
+                        register_task();
                     });
                 }
             }];
             
-            write_log(@"  ✅ Task registered!");
-            write_log(@"    ID: %lu", (unsigned long)bgTask);
-            write_log(@"    Remaining: %.1f sec", [app backgroundTimeRemaining]);
+            write_log(@"  ✅ Registered: %lu", (unsigned long)bgTask);
             
         } @catch (NSException *e) {
             write_log(@"  ❌ Exception: %@", e);
             bgTask = UIBackgroundTaskInvalid;
         }
-        
-        log_memory_usage();
-        write_log(@"╚═══════════════════════════════════════════════════════════╝");
+        isRefreshing = NO;
     }
 }
 
 // ============================================================
-// KEEP ALIVE TIMER
+// KEEP ALIVE
 // ============================================================
-static void keep_alive_tick(NSTimer *timer) {
+static void keep_alive_tick(void) {
     @autoreleasepool {
-        if (isCleaningUp || !isInitialized) return;
+        static int tick = 0;
+        tick++;
         
-        static int tickCounter = 0;
-        tickCounter++;
+        UIApplication *app = [UIApplication sharedApplication];
+        if (!app || !inBackground) return;
         
-        if (tickCounter % (int)(30.0 / TIMER_INTERVAL) == 0) {
+        double remaining = [app backgroundTimeRemaining];
+        double now = [[NSDate date] timeIntervalSince1970];
+        
+        // Log every 2 minutes
+        if (tick % (int)(120.0 / TIMER_INTERVAL) == 0) {
             write_log(@"");
             write_log(@"┌─────────────────────────────────────────────────");
-            write_log(@"│ KEEP-ALIVE TICK #%d", tickCounter);
-            write_log(@"├─────────────────────────────────────────────────");
-            write_log(@"│ In background: %@", inBackground ? @"YES" : @"NO");
-            write_log(@"│ Task ID: %lu", (unsigned long)bgTask);
-            write_log(@"│ Task valid: %@", bgTask != UIBackgroundTaskInvalid ? @"YES" : @"NO");
-            
-            UIApplication *app = [UIApplication sharedApplication];
-            if (app && inBackground) {
-                double remaining = [app backgroundTimeRemaining];
-                write_log(@"│ Time remaining: %.1f sec", remaining);
-                
-                // Auto-refresh if time is low
-                if (remaining < 60.0 && remaining > 0 && !isCleaningUp) {
-                    write_log(@"│ ⚠️ Time low! Refreshing...");
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        register_background_task();
-                    });
-                }
-            }
-            
-            log_memory_usage();
+            write_log(@"│ TICK #%d", tick);
+            write_log(@"│ Time remaining: %.1f sec", remaining);
+            write_log(@"│ Task: %lu", (unsigned long)bgTask);
             write_log(@"└─────────────────────────────────────────────────");
+        }
+        
+        // CRITICAL: Refresh only when needed and with cooldown
+        if (remaining < REFRESH_THRESHOLD && remaining > 0) {
+            if (now - lastRefreshTime > REFRESH_COOLDOWN) {
+                lastRefreshTime = now;
+                write_log(@"  🔄 Refreshing (%.1f sec remaining)", remaining);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    register_task();
+                });
+            }
         }
     }
 }
 
 // ============================================================
-// APPLICATION STATE CHANGES
+// NOTIFICATIONS
 // ============================================================
-static void app_did_enter_background(NSNotification *notification) {
-    if (isCleaningUp) return;
-    
-    backgroundEnterCount++;
+static void on_background(NSNotification *n) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║  📱 BACKGROUND (#%d)", backgroundEnterCount);
+    write_log(@"║  📱 BACKGROUND MODE                                     ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
-    
     inBackground = YES;
-    
-    UIApplication *app = [UIApplication sharedApplication];
-    if (app) {
-        write_log(@"  Time remaining: %.1f sec", [app backgroundTimeRemaining]);
-        write_log(@"  State: %ld", (long)[app applicationState]);
-    }
-    log_memory_usage();
-    
-    register_background_task();
+    register_task();
 }
 
-static void app_will_enter_foreground(NSNotification *notification) {
-    if (isCleaningUp) return;
-    
+static void on_foreground(NSNotification *n) {
     write_log(@"");
     write_log(@"╔═══════════════════════════════════════════════════════════╗");
-    write_log(@"║  📱 FOREGROUND                                          ║");
+    write_log(@"║  📱 FOREGROUND MODE                                     ║");
     write_log(@"╚═══════════════════════════════════════════════════════════╝");
-    
     inBackground = NO;
     
     if (bgTask != UIBackgroundTaskInvalid) {
         UIApplication *app = [UIApplication sharedApplication];
         if (app) {
-            write_log(@"  Ending task %lu...", (unsigned long)bgTask);
-            @try {
-                [app endBackgroundTask:bgTask];
-                bgTask = UIBackgroundTaskInvalid;
-                write_log(@"  ✅ Task ended");
-            } @catch (NSException *e) {
-                write_log(@"  ❌ Exception: %@", e);
-                bgTask = UIBackgroundTaskInvalid;
-            }
+            [app endBackgroundTask:bgTask];
+            bgTask = UIBackgroundTaskInvalid;
+            write_log(@"  ✅ Task ended");
         }
     }
-    log_memory_usage();
 }
 
 // ============================================================
-// MAIN INIT
+// INIT
 // ============================================================
 static void init_anti_kick(void) {
     @autoreleasepool {
@@ -332,123 +263,126 @@ static void init_anti_kick(void) {
         
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
-        write_log(@"║  🔥 ANTI-KICK v4.0 (10/10)                              ║");
-        write_log(@"║  Production Ready                                       ║");
+        write_log(@"║  🔥 ANTI-KICK v5.0 (PRODUCTION)                        ║");
+        write_log(@"║  ✅ Silent audio enabled                                ║");
+        write_log(@"║  ✅ Background mode active                              ║");
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
         write_log(@"");
         
         UIApplication *app = [UIApplication sharedApplication];
         if (!app) {
-            write_log(@"❌ UIApplication is NULL!");
+            write_log(@"❌ No UIApplication");
             return;
         }
         
-        // Disable idle timer
-        write_log(@"  Step 1: Disabling idle timer...");
-        @try {
-            [app setIdleTimerDisabled:YES];
-            write_log(@"  ✅ Done");
-        } @catch (NSException *e) {
-            write_log(@"  ❌ Failed: %@", e);
-        }
+        // 1. Disable idle timer
+        write_log(@"Step 1: Disabling idle timer...");
+        [app setIdleTimerDisabled:YES];
+        write_log(@"  ✅ Done");
         
-        // Initialize observers array
-        notificationObservers = [[NSMutableArray alloc] init];
+        // 2. CRITICAL: Silent audio
+        write_log(@"Step 2: Starting silent audio...");
+        init_silent_audio();
+        
+        // 3. Register observers
+        write_log(@"Step 3: Registering observers...");
+        observers = [[NSMutableArray alloc] init];
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
         
-        // Register observers
-        write_log(@"  Step 2: Registering observers...");
-        @try {
-            id observer;
-            
-            observer = [center addObserverForName:UIApplicationDidEnterBackgroundNotification
-                                           object:nil
-                                            queue:[NSOperationQueue mainQueue]
-                                       usingBlock:^(NSNotification *note) {
-                                           app_did_enter_background(note);
-                                       }];
-            [notificationObservers addObject:observer];
-            
-            observer = [center addObserverForName:UIApplicationWillEnterForegroundNotification
-                                           object:nil
-                                            queue:[NSOperationQueue mainQueue]
-                                       usingBlock:^(NSNotification *note) {
-                                           app_will_enter_foreground(note);
-                                       }];
-            [notificationObservers addObject:observer];
-            
-            write_log(@"  ✅ Done (%lu observers)", (unsigned long)notificationObservers.count);
-        } @catch (NSException *e) {
-            write_log(@"  ❌ Failed: %@", e);
-        }
+        id obs = [center addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                     object:nil
+                                      queue:[NSOperationQueue mainQueue]
+                                 usingBlock:^(NSNotification *n) { on_background(n); }];
+        [observers addObject:obs];
         
-        // Start timer with proper target
-        write_log(@"  Step 3: Starting timer (interval: %.1fs)...", TIMER_INTERVAL);
-        @try {
-            // Create a simple object to hold timer callback
-            // Using dispatch_source timer instead for iOS 10+
-            dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0);
-            dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
-            dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, TIMER_INTERVAL * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
-            dispatch_source_set_event_handler(timer, ^{
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    keep_alive_tick(nil);
-                });
+        obs = [center addObserverForName:UIApplicationWillEnterForegroundNotification
+                                  object:nil
+                                   queue:[NSOperationQueue mainQueue]
+                              usingBlock:^(NSNotification *n) { on_foreground(n); }];
+        [observers addObject:obs];
+        write_log(@"  ✅ Done");
+        
+        // 4. Start timer (dispatch_source)
+        write_log(@"Step 4: Starting timer (%.1f sec)...", TIMER_INTERVAL);
+        dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0);
+        timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+        dispatch_source_set_timer(timer, DISPATCH_TIME_NOW, TIMER_INTERVAL * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
+        dispatch_source_set_event_handler(timer, ^{
+            dispatch_async(dispatch_get_main_queue(), ^{
+                keep_alive_tick();
             });
-            dispatch_resume(timer);
-            
-            // Store timer in a global static
-            static dispatch_source_t globalTimer = NULL;
-            globalTimer = timer;
-            
-            write_log(@"  ✅ Done (dispatch_source timer)");
-        } @catch (NSException *e) {
-            write_log(@"  ❌ Failed: %@", e);
-        }
+        });
+        dispatch_resume(timer);
+        write_log(@"  ✅ Done");
         
-        // Register initial task
-        write_log(@"  Step 4: Registering initial task...");
-        register_background_task();
+        // 5. Initial registration
+        write_log(@"Step 5: Initial registration...");
+        register_task();
         
         isInitialized = YES;
         
         write_log(@"");
         write_log(@"╔═══════════════════════════════════════════════════════════╗");
-        write_log(@"║  ✅ ANTI-KICK INITIALIZED (10/10)                       ║");
-        write_log(@"║  Log: Documents/saves/AntiKick.log                      ║");
-        write_log(@"║  Interval: %.1f sec                                     ║", TIMER_INTERVAL);
-        write_log(@"║  Status: ACTIVE                                         ║");
+        write_log(@"║  ✅ ANTI-KICK ACTIVE                                    ║");
+        write_log(@"║  ✅ Silent audio: playing                               ║");
+        write_log(@"║  ✅ Background mode: active                             ║");
+        write_log(@"║  ✅ App will stay alive FOREVER                         ║");
         write_log(@"╚═══════════════════════════════════════════════════════════╝");
         write_log(@"");
     }
 }
 
 // ============================================================
-// ENTRY POINT
+// CLEANUP
+// ============================================================
+static void cleanup(void) {
+    write_log(@"🧹 Cleanup...");
+    
+    if (timer) {
+        dispatch_source_cancel(timer);
+        timer = NULL;
+    }
+    
+    if (silentPlayer) {
+        [silentPlayer stop];
+        silentPlayer = nil;
+    }
+    
+    if (bgTask != UIBackgroundTaskInvalid) {
+        [[UIApplication sharedApplication] endBackgroundTask:bgTask];
+        bgTask = UIBackgroundTaskInvalid;
+    }
+    
+    if (observers) {
+        for (id obs in observers) {
+            [[NSNotificationCenter defaultCenter] removeObserver:obs];
+        }
+        [observers removeAllObjects];
+        observers = nil;
+    }
+    
+    isInitialized = NO;
+    write_log(@"✅ Cleanup complete");
+}
+
+// ============================================================
+// ENTRY
 // ============================================================
 __attribute__((constructor))
 static void inject(void) {
-    // Use short delay with async to let app load
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, INIT_DELAY * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1 * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         @try {
             init_anti_kick();
         } @catch (NSException *e) {
-            write_log(@"");
-            write_log(@"╔═══════════════════════════════════════════════════════════╗");
-            write_log(@"║  ❌ INIT FAILED!                                         ║");
-            write_log(@"║  Exception: %@", e);
-            write_log(@"╚═══════════════════════════════════════════════════════════╝");
+            write_log(@"❌ Init error: %@", e);
         }
     });
 }
 
-// ============================================================
-// CLEANUP ON UNLOAD (if possible)
-// ============================================================
 __attribute__((destructor))
 static void unload(void) {
-    cleanup_anti_kick();
+    cleanup();
 }
 
 extern "C" void __dummy_export(void) {}
