@@ -1,5 +1,5 @@
 // main.mm - Black Russia Hitbox Patcher (ARM64)
-// Fixed for iOS SDK compatibility
+// Fixed forward declaration issue
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -32,7 +32,12 @@ static HitboxPattern gPatterns[] = {
 #define PATTERN_COUNT (sizeof(gPatterns)/sizeof(gPatterns[0]))
 
 // ============================================================
-// 2. Memory scanning helpers
+// 2. Forward declaration
+// ============================================================
+static void show_notification(NSString *title, NSString *subtitle);
+
+// ============================================================
+// 3. Memory scanning helpers
 // ============================================================
 static mach_port_t gTask = MACH_PORT_NULL;
 
@@ -94,7 +99,7 @@ static void get_regions(vm_address_t *outBase, vm_size_t *outSize) {
 }
 
 // ============================================================
-// 3. Main patching logic
+// 4. Main patching logic
 // ============================================================
 static void patch_hitboxes(void) {
     gTask = mach_task_self();
@@ -150,7 +155,7 @@ static void patch_hitboxes(void) {
 }
 
 // ============================================================
-// 4. Notification display (UIAlertController)
+// 5. Notification display (UIAlertController)
 // ============================================================
 static void show_notification(NSString *title, NSString *subtitle) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -172,8 +177,11 @@ static void show_notification(NSString *title, NSString *subtitle) {
         }
         
         if (!window) {
-            // Fallback for older iOS
-            window = [UIApplication sharedApplication].windows.firstObject;
+            // Fallback: try to get first window
+            NSArray *windows = [UIApplication sharedApplication].windows;
+            if (windows.count > 0) {
+                window = windows.firstObject;
+            }
         }
         
         UIViewController *rootVC = window.rootViewController;
@@ -196,7 +204,7 @@ static void show_notification(NSString *title, NSString *subtitle) {
 }
 
 // ============================================================
-// 5. Entry point - called when library is loaded
+// 6. Entry point - called when library is loaded
 // ============================================================
 __attribute__((constructor))
 static void initialize(void) {
@@ -208,7 +216,7 @@ static void initialize(void) {
 }
 
 // ============================================================
-// 6. Dummy export to avoid stripping
+// 7. Dummy export to avoid stripping
 // ============================================================
 extern "C" void __dummy_export(void) {}
 
