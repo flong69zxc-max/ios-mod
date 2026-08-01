@@ -1,4 +1,4 @@
-типо такого: name: Build iOS dylib
+name: Build iOS dylib
 
 on:
   push:
